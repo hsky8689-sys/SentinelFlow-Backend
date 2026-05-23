@@ -12,7 +12,7 @@ function getCookie(name){
             }
             return cookieValue;
         }
-        async function goToProjectCreation(){
+ async function goToProjectCreation(){
            try{
         const response = await fetch('/users/create-new-project/', {
             headers: {'X-Requested-With': 'XMLHttpRequest'}
@@ -156,4 +156,7 @@ async function goToConnections(){
     }catch (error){
         alert(error);
     }
+}
+function start1on1Chat(targetUserId) {
+    window.location.href = `/chat/?user_1o1=${targetUserId}`;
 }

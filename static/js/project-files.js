@@ -128,6 +128,7 @@ async function pushModified(){
               });
         if(response.ok){
             window.localStorage.setItem("dirtyFiles",JSON.stringify([]));
+            Object.assign(repoCache, {});
             window.location.reload();
         }
         else{

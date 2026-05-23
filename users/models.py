@@ -6,7 +6,6 @@ from datetime import datetime
 from django.utils import timezone
 from django.db import transaction
 
-
 class CustomUserManager(BaseUserManager):
     def create_user(self,username,email,password,birthday):
         user = self.model(username=username, email=email, birthday=birthday)
@@ -234,7 +233,7 @@ class RequestManager(models.Manager):
                 receiver=receiver,
                 request_type='friend',
                 status= 'pending',
-                timestamp= timezone.now()
+                timestamp= timezone.now
             )
             return obj
         except Exception as err:

@@ -3,7 +3,9 @@
 <html lang="en">
 <head>
     <meta charset="utf-8"/>
+    {% block title %}
     <title>Profile page {{username}}</title>
+    {% endblock %}
     <link rel="stylesheet" href="{% static 'css/profile-page.css' %}">
     <link rel="author" href="{% static 'css/img' %}">
     <script src="{% static 'js/edit-profile.js' %}" defer></script>
@@ -15,6 +17,8 @@
         }
     };
 </script>
+    {% block extracss %}{% endblock %}
+    {% block extrajs %}{% endblock %}
 </head>
 <body>
     <div class="buttons-bar">

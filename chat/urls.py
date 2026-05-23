@@ -19,7 +19,8 @@ from django.urls import path
 from chat import views
 app_name = "chat"
 urlpatterns = [
-    path("",views.index,name="chat"),
-    path("<str:room_name>/",views.room,name="room"),
-    path("signup",views.signup,name="signup")
+    path('', views.open_chat_room, name='chat_room'),
+    path("api/send", views.chat_message_api, name="send_message"),
+    path("api/<int:conversation_id>",views.load_chat_by_id,name="load_chat"),
+    path("conversations/",views.load_user_conversations,name="load_conversations")
 ]

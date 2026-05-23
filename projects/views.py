@@ -318,9 +318,16 @@ def handle_file_content(request,owner, repo, path):
         cache.set(cache_key, r.json(), timeout=3600)
         return JsonResponse(r.json(), safe=False)
     return JsonResponse(r.json(), status=r.status_code, safe=False)
-
+@login_required
+def invalidate_repo_cache(repo:str,owner:str):
+    try:
+        print(len([k for k in cache.keys("*") if (repo in k and owner in k)]))
+        print("-"*30)
+    except Exception as e:
+        print(str(e))
 @login_required
 def github_proxy_view(request, owner, repo, path=""):
+    #invalidate_repo_cache(repo,owner)
     if path != "" and '.' in path.split('/')[-1]:
         return handle_file_content(request,owner, repo, path)
 
@@ -354,9 +361,7 @@ def github_proxy_view(request, owner, repo, path=""):
             'path': item['path'],
             'type': 'dir' if item['type'] == 'tree' else 'file'
         })
-
     cache.set(cache_key, formatted_tree, timeout=3600)
-
     return JsonResponse(filter_tree_by_path(request,formatted_tree, path), safe=False)
 @login_required
 @csrf_exempt
@@ -391,6 +396,7 @@ def request_file_open(request):
 @login_required
 @require_http_methods(["POST"])
 def push_files(request):
+    invalidate_repo_cache()
     try:
         data = json.loads(request.body)
         files = data.get('files',{})

@@ -1,0 +1,39 @@
+{% extends 'html/profile_page_template.html' %}
+{% load static %}
+{% block title %}
+    <title>Chat room</title>
+{% endblock %}
+{% block extracss %}
+    <link rel="stylesheet" href="{% static 'css/chat-room.css' %}">
+{% endblock %}
+{% block extrajs %}
+    <script src="{% static 'js/chat-page.js' %}" defer></script>
+    <script>
+    window.djangoContext['chat_info']=
+        {
+            conversation_id: {{ chat_id }},
+            current_user_converstaion:{{ user_101 }}
+        }
+    </script>
+{% endblock %}
+{% block content %}
+<div id="chat-area">
+    <div class="all-conversations">
+        <div class="message-send-area">
+            <input type="text" id="search-conversations" style="display: none"/>
+        </div>
+    </div>
+    <div class="current-conversation">
+        <div class="conversation-photo">
+            <img src="{{ conversation_avatar }}" alt="Profile" class="user-avatar">
+            <span class="chat-name">{{ conversation_name }}</span>
+        </div>
+        <div class="message-display">
+        </div>
+        <div class="message-send-area">
+            <input type="text" id="send-message"/>
+            <input type="button" id="send-button" value="Send" onclick="sendMessage()"/>
+        </div>
+    </div>
+</div>
+{% endblock %}
