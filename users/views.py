@@ -5,9 +5,9 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
-from django.templatetags.static import static
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+from django.db import transaction
 
 from projects.models import Project
 from .models import User, UserProfileSection, UserTechnicalSkillSection, UserTechnicalSkill, UserRequest, Friendship, \
@@ -15,7 +15,6 @@ from .models import User, UserProfileSection, UserTechnicalSkillSection, UserTec
 from .search import SearchManager, SearchFilterData
 
 
-# Create your views here.
 @login_required
 def search_page(request):
     return render(request, 'html/search.html', {'user_id': request.user.id})
@@ -149,6 +148,7 @@ def create_project(request):
         return acces_profile(request,request.user.username)
 @require_http_methods(["POST"])
 @csrf_exempt
+@transaction.atomic
 def api_add_skill(request):
     name = request.POST.get('name')
     section_id = request.POST.get('section_id')
@@ -158,9 +158,13 @@ def api_add_skill(request):
         return JsonResponse({'status': 'error', 'message': 'Date lipsă'}, status=400)
 
     success = UserTechnicalSkill.objects.add_user_skill(name=name, section_id=section_id)
-    return JsonResponse({'status': 'success' if success else 'error'})
+    if success:
+        return JsonResponse({'status': 'success','message':'Skill was succsesfully added'},status=200)
+    else:
+        return JsonResponse({'status': 'error','message':'Skill was already added before'},status=500)
 @require_http_methods(["DELETE"])
 @csrf_exempt
+@transaction.atomic
 def api_delete_skill(request,skill_id):
     try:
         skill = UserTechnicalSkill.objects.get(id=skill_id)
@@ -172,21 +176,17 @@ def api_delete_skill(request,skill_id):
 @login_required
 def api_send_friend_request(request,receiver):
     try:
-        # get() aruncă User.DoesNotExist dacă nu găsește, deci nu e nevoie de "is None"
         user = User.objects.get(id=receiver)
         if user == request.user:
             return JsonResponse({'status': 'error', 'message': "Cannot send request to self"}, status=400)
-        # Trimiți obiectul request.user, nu request.user.id
         sent = UserRequest.objects.send_friend_request(request.user, user)
         if sent is None:
             return JsonResponse({'status': 'error', 'message': 'Request already exists or failed'}, status=400)
-        # Aici aveai status 404 pentru "succes", l-am schimbat in 200
         return JsonResponse({'status': 'succes', 'code': 200})
     except User.DoesNotExist:
         return JsonResponse({'status': 'error', 'message': 'User not found'}, status=404)
     except Exception as e:
         print(f"Eroare API: {str(e)}")
-        # Acum view-ul returnează un JSON chiar și când crapă ceva, evitând eroarea 500 în browser
         return JsonResponse({'status': 'error', 'message': 'Internal Server Error'}, status=500)
 @require_http_methods(["POST"])
 @login_required
@@ -201,16 +201,19 @@ def api_accept_friend_request(request,sender):
         if friend_request.first().status != 'pending':
             return JsonResponse({'status': 'error', 'message': 'Request has already been handled'}, status=403)
         sent = UserRequest.objects.accept_request(friend_request.first())
+        if sent is None:
+            return JsonResponse({'status': 'error', 'message': 'Request has not been sent'}, status=500)
         UserRequest.objects.remove_request(friend_request.first())
         if sent is None:
             return JsonResponse({'status': 'error', 'message': 'Request already exists or failed'}, status=400)
-        return JsonResponse({'status': 'succes', 'code': 200})
+        return JsonResponse({'status': 'succes','message':'Request has been sent'},status=200)
     except User.DoesNotExist:
         return JsonResponse({'status': 'error', 'message': 'User not found'}, status=404)
     except Exception as e:
         print(f"Eroare API: {str(e)}")
         return JsonResponse({'status': 'error', 'message': 'Internal Server Error'}, status=500)
 @login_required
+@transaction.atomic
 def api_remove_friend(request,removed):
     try:
         removed = User.objects.get(id=removed)
@@ -219,7 +222,9 @@ def api_remove_friend(request,removed):
         friendship = Friendship.objects.find_friendship(request.user,removed)
         if friendship is None:
             return JsonResponse({'status': 'error', 'message': 'Friendship does not exist'}, status=404)
-        Friendship.objects.remove_friendship(request.user,removed)
+        removed_friendship = Friendship.objects.remove_friendship(request.user,removed)
+        if not removed_friendship:
+            return JsonResponse({'status': 'error', 'message': 'Friendship not found or already removed'}, status=404)
         friendship_request = UserRequest.objects.find_request(request.user,removed)
         if len(list(friendship_request))>0:
             UserRequest.objects.remove_request(friendship_request.first())
@@ -228,6 +233,7 @@ def api_remove_friend(request,removed):
         print(str(e))
         return JsonResponse({'status': 'error', 'message': 'Internal Server Error'}, status=500)
 @login_required
+@transaction.atomic
 def api_cancel_request(request,id):
     try:
         user = User.objects.get(id=id)

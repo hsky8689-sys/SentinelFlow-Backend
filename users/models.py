@@ -1,6 +1,6 @@
 import django.db
 from django.db.models import Q
-from django.db import models
+from django.db import models,transaction
 from django.contrib.auth.models import AbstractBaseUser,BaseUserManager,PermissionsMixin
 from datetime import datetime
 from django.utils import timezone
@@ -8,12 +8,14 @@ from django.db import transaction
 
 class CustomUserManager(BaseUserManager):
     def create_user(self,username,email,password,birthday):
-        user = self.model(username=username, email=email, birthday=birthday)
-        user.set_password(password)
-        user.save(using=self._db)
-        UserProfileSection.objects.create_default_user_sections(user.id)
-        UserTechnicalSkillSection.objects.create_user_default_techstack(user.id)
-        return user
+        with transaction.atomic():
+            user = self.model(username=username, email=email, birthday=birthday)
+            user.set_password(password)
+            user.save(using=self._db)
+            UserProfileSection.objects.create_default_user_sections(user.id)
+            UserTechnicalSkillSection.objects.create_user_default_techstack(user.id)
+            return user
+
     def create_superuser(self, username, email, password=None, **extra_fields):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
@@ -62,7 +64,6 @@ class CustomUserProfileSectionManager(models.Manager):
         :param hidden: States if the section will be or not hidden to foreign profile visitors
         :return: None
         """
-        from devnetwork import settings
         new_section = (self.create(user=user,
                                name=name,
                                content=content,
@@ -78,19 +79,23 @@ class CustomUserProfileSectionManager(models.Manager):
         self.filter(id=section_id,user_id=user.id).delete()
         return self.filter(id=section_id).count() == 0
 
-    def update_user_profile_section(self,user,new_section)->bool:
+    def update_user_profile_section(self,new_section)-> bool | None:
         """
         Updates a user's profile section
         :param user:
         :return: true or false if the section was updated accordingly
         """
-        former_section = UserProfileSection.objects.get(id=new_section.id)
-        if former_section is None:
-            return False
-        former_section.name = new_section.name
-        former_section.content = new_section.content
-        former_section.hidden = new_section.hidden
-        return True
+        try:
+            with transaction.atomic():
+                former_section = UserProfileSection.objects.select_for_update().filter(id=new_section.id)
+                if former_section is None:
+                    return False
+                former_section.update(name=new_section.name,content=new_section.content,hidden=new_section.hidden)
+                return True
+        except (django.db.DatabaseError,ValueError) as err:
+            print(f"Error handling request: {str(err)}")
+            return None
+
     def get_user_profile_sections(self,user,includehidden=False):
         """
         :param user:
@@ -131,7 +136,16 @@ class UserTechnicalSkillsManager(models.Manager):
         :param section_id:
         :return:
         """
-        return self.create(name=name,section_id=section_id) is not None
+        try:
+            with transaction.atomic():
+                already_existing = self.filter(name=name,section_id=section_id).select_for_update().first()
+                if already_existing:
+                    transaction.set_rollback(True)
+                    return None
+                return self.get_or_create(name=name,section_id=section_id) if not already_existing else None
+        except (django.db.DatabaseError, ValueError) as err:
+            print(f"Error handling request: {str(err)}")
+            return None
 
     def remove_user_skill(self,skill):
         """
@@ -139,6 +153,8 @@ class UserTechnicalSkillsManager(models.Manager):
         :param skill:
         :return:
         """
+        if not skill:
+            raise django.db.DatabaseError("Skill cannot be None")
         return self.get(id=skill.id).delete()
     def get_skills_from_section(self, section_id):
         """
@@ -208,37 +224,36 @@ class Post(models.Model):
 class RequestManager(models.Manager):
     def find_request(self,sender,receiver):
         try:
-            found = self.filter(Q(sender=sender,receiver=receiver)|Q(sender=receiver,receiver=sender))
-            return found
+            return self.filter(Q(sender=sender,receiver=receiver)|Q(sender=receiver,receiver=sender))
         except django.db.DatabaseError as e:
             print(str(e))
             return None
-    def send_friend_request(self,sender,receiver):
-        """
 
+    def send_friend_request(self, sender, receiver):
+        """
         :param sender:
         :param receiver:
         :return:
         """
         try:
-            try:
+            with transaction.atomic():
                 found = self.find_request(sender, receiver)
                 if found:
+                    transaction.set_rollback(True)
                     return None
-            except ValueError:
-                pass
 
-            obj, created = self.get_or_create(
-                sender=sender,
-                receiver=receiver,
-                request_type='friend',
-                status= 'pending',
-                timestamp= timezone.now
-            )
-            return obj
-        except Exception as err:
-            print(f"Eroare ORM: {str(err)}")
+                obj, created = self.get_or_create(
+                    sender=sender,
+                    receiver=receiver,
+                    request_type='friend',
+                    status='pending',
+                    timestamp=timezone.now()
+                )
+                return obj
+        except (django.db.DatabaseError, ValueError) as err:
+            print(f"Error handling request: {str(err)}")
             return None
+
     def accept_request(self,request):
         try:
             with transaction.atomic():
@@ -257,48 +272,58 @@ class RequestManager(models.Manager):
         except (django.db.DatabaseError,ValueError) as err:
             print(f"Error handling request: {str(err)}")
             return None
+
     def deny_request(self,request):
         try:
-            found = self.find_request(request.sender, request.receiver)
-            if found is None:
-                raise django.db.DatabaseError("Request wasn't found")
-            if found.status != 'pending':
-                raise ValueError("Request was already handled")
-            found.select_for_update()
-            found.status = 'declined'
-            found.save()
-            return found
-        except django.db.DatabaseError as err:
-            print(str(err))
+            with transaction.atomic():
+                found = self.select_for_update().filter(
+                    sender=request.sender,
+                    receiver=request.receiver
+                ).first()
+                if found is None:
+                    raise django.db.DatabaseError("Request wasn't found")
+                if found.status != 'pending':
+                    raise ValueError("Request was already handled")
+                found.status = 'declined'
+                found.save()
+                return found
+        except (django.db.DatabaseError, ValueError) as err:
+            print(f"Error handling request: {str(err)}")
             return None
-        except ValueError as err:
-            print(str(err))
-            return None
+
     def get_user_requests(self,user):
         try:
             return self.filter(receiver=user)
         except django.db.DatabaseError:
             return []
-    def remove_request(self,request):
+
+    def remove_request(self, request):
         try:
-            return request.delete()
+            deleted_count, _ = request.delete()
+            return deleted_count > 0
         except django.db.DatabaseError:
-            return None
+            return False
+
     def send_project_join_request(self,sender,receivers):
         try:
-            return [
-                self.create(sender=sender,
+            with transaction.atomic():
+                already_sent = self.filter(sender=sender,receiver__in=receivers,status='pending')
+                if already_sent.exists():
+                    transaction.set_rollback(True)
+                    return None
+                return [
+                    self.create(sender=sender,
                             receiver=receiver,
                             request_type='project',
                             status='pending')
-                for receiver in receivers
-            ]
+                    for receiver in receivers
+                ]
         except django.db.DatabaseError as e:
             print(str(e))
             return None
 
     def send_project_invitation(self,sender,receiver):
-        pass
+        print('te rog')#e mecanic...il fac alta data...
 
     def send_files_access_request(self,user,project,requested_access,valid_admins):
         try:
@@ -312,7 +337,7 @@ class RequestManager(models.Manager):
             )
         except django.db.DatabaseError as e:
             print(str(e))
-            return None
+
 class UserRequest(models.Model):
     pk = models.CompositePrimaryKey("sender_id","receiver_id")
     sender = models.ForeignKey(
@@ -349,12 +374,13 @@ class UserRequest(models.Model):
             )
         ]
 class FriendshipManager(models.Manager):
-    def remove_friendship(self,friend1,friend2):
+    def remove_friendship(self, friend1, friend2):
         try:
             fr = self.get(Q(sender=friend1, receiver=friend2) | Q(sender=friend2, receiver=friend1))
-            return fr.delete()
-        except django.db.DatabaseError:
-            return None
+        except Friendship.DoesNotExist:
+            return False
+        deleted_count, _ = fr.delete()
+        return deleted_count > 0
     def find_friendship(self,friend1,friend2):
         try:
             fr = self.filter(Q(sender=friend1,receiver=friend2)|Q(sender=friend2,receiver=friend1))
