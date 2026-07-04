@@ -111,7 +111,7 @@ DEFAULT_TECHSTACK_CATEGORIES=['Frontend',
                               'Tools'
                                ]
 
-SEARCH_TYPE = ['ALL','USERS','PROJECTS','POSTS']
+SEARCH_TYPE = ['ALL','USERS','PROJECTS']
 
 DEFAULT_SECTIONS = {
     'About me': config('ABOUT_ME_DEFAULT'),

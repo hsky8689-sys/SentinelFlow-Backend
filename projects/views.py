@@ -17,25 +17,14 @@ from django.views.decorators.csrf import csrf_exempt, csrf_protect
 from django.views.decorators.http import require_http_methods, require_POST, require_GET
 from django_ratelimit.decorators import ratelimit
 
-import users.views
 from devnetwork import settings
 from projects.models import Project, UserProjectRole, ProjectDomain, ProjectSkillRequirement, ProjectRequirementSection, \
     ProjectTask, ProjectRole, ResourceAccess, TaskResourceAccess, ProjectTaskParticipation
 from users.models import User, UserRequest
 
 
-@login_required
-def create_project(request):
-    if request.method == 'POST':
-        users.views.acces_profile(request,request.user.username)
-    else:
-        return JsonResponse({'status': 'error',
-                      'code' : 404
-                      })
 def get_user_file_permissions(user,project):
     try:
-        if user is None or user.is_anonymous:
-            return {}
         if project is None:
             return {}
         all_project_files = get_project_tree_paths(project,'master')
@@ -52,7 +41,9 @@ def get_user_file_permissions(user,project):
         print(str(e))
         return {}
 @login_required
-@csrf_exempt
+@csrf_protect
+@require_GET
+@ratelimit(key='user',rate='120/m',block=True)
 def open_project_page(request,name):
     project = Project.objects.filter(name=name).first()
     if not project:
@@ -88,6 +79,9 @@ def open_project_page(request,name):
     }
     return render(request, 'html/project_page.html', {'stats': context_data})
 @login_required
+@csrf_protect
+@require_GET
+@ratelimit(key='user',rate='120/m',block=True)
 def open_project_members_page(request,name):
     project = Project.objects.filter(name=name).first()
     result = UserProjectRole.objects.get_all_users_in_project(project)
@@ -96,6 +90,8 @@ def open_project_members_page(request,name):
 
 @login_required
 @csrf_protect
+@require_GET
+@ratelimit(key='user',rate='60/m',block=True)
 def open_project_settings(request, name):
     project = get_object_or_404(Project, name=name)
     user_role = UserProjectRole.objects.get_user_role_in_project(project, request.user)
@@ -111,8 +107,10 @@ def open_project_settings(request, name):
         'user_username': request.user.username,
     }
     return render(request, 'html/project_settings_page.html', {'stats': context_data})
-@require_http_methods(["GET"])
+@login_required
 @csrf_protect
+@require_GET
+@ratelimit(key='user',rate='120/m',block=True)
 def api_get_project_domains(request,name):
     try:
         project = get_object_or_404(Project,name=name)
@@ -120,8 +118,10 @@ def api_get_project_domains(request,name):
         return JsonResponse({'status':'success','domains':list(domains.values())})
     except django.db.DatabaseError:
         return JsonResponse({'status': 'error', 'code': 500})
-@require_http_methods(["POST"])
+@login_required
 @csrf_protect
+@require_POST
+@ratelimit(key='user',rate='30/m',block=True)
 def api_add_project_domains(request,name):
     try:
         if request.method == 'POST':
@@ -138,10 +138,11 @@ def api_add_project_domains(request,name):
                 return JsonResponse({'status':'Unauthorized access','code':403})
     except Exception as e:
         print(str(e))
-    except django.db.DatabaseError:
-        return JsonResponse({'status': 'error', 'code': 500})
-@require_http_methods(["POST"])
+        return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
+@login_required
 @csrf_protect
+@require_POST
+@ratelimit(key='user',rate='30/m',block=True)
 def api_delete_project_domains(request,name):
     try:
             project = get_object_or_404(Project, name=name)
@@ -160,10 +161,11 @@ def api_delete_project_domains(request,name):
                                          },status=500)
     except Exception as e:
         print(str(e))
-    except django.db.DatabaseError:
-        return JsonResponse({'status': 'error', 'code': 500})
-@require_http_methods(["GET"])
+        return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
+@login_required
 @csrf_protect
+@require_GET
+@ratelimit(key='user',rate='120/m',block=True)
 def api_get_project_requirements(request,name):
     try:
         project = get_object_or_404(Project,name=name)
@@ -171,10 +173,11 @@ def api_get_project_requirements(request,name):
         return JsonResponse({'status':'succes','requirements':succes})
     except Exception as e:
         print(str(e))
-    except django.db.DatabaseError:
-        return JsonResponse({'status': 'error', 'code': 404})
-@require_http_methods(["POST"])
+        return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
+@login_required
 @csrf_protect
+@require_POST
+@ratelimit(key='user',rate='30/m',block=True)
 def api_add_project_requirements(request,name):
     try:
         with transaction.atomic():
@@ -204,10 +207,11 @@ def api_add_project_requirements(request,name):
                 return JsonResponse({'status': 'Unauthorized access'},status=403)
     except Exception as e:
         print(str(e))
-    except django.db.DatabaseError:
-        return JsonResponse({'status': 'error', 'code': 404})
-@require_http_methods(["POST"])
+        return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
+@login_required
 @csrf_protect
+@require_POST
+@ratelimit(key='user',rate='30/m',block=True)
 def api_remove_project_requirements(request,name):
     try:
         with transaction.atomic():
@@ -236,10 +240,11 @@ def api_remove_project_requirements(request,name):
                 return JsonResponse({'status': 'Unauthorized access'},status=403)
     except Exception as e:
         print(str(e))
-    except django.db.DatabaseError:
-        return JsonResponse({'status': 'error', 'code': 404})
-@require_http_methods(["POST"])
+        return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
+@login_required
 @csrf_protect
+@require_POST
+@ratelimit(key='user',rate='30/m',block=True)
 def api_remove_project_sections(request,name):
     try:
         project = get_object_or_404(Project, name=name)
@@ -258,10 +263,10 @@ def api_remove_project_sections(request,name):
             return JsonResponse({'status': 'Unauthorized access'},status=403)
     except Exception as e:
         return JsonResponse({'status': 'error', 'message': 'Internal server error'},status=500)
-    except django.db.DatabaseError:
-        return JsonResponse({'status': 'error', 'message': 'Internal server error'},status=500)
-@require_http_methods(["POST"])
+@login_required
 @csrf_protect
+@require_POST
+@ratelimit(key='user',rate='30/m',block=True)
 def api_add_project_sections(request,name):
     try:
         project = get_object_or_404(Project, name=name)
@@ -280,11 +285,10 @@ def api_add_project_sections(request,name):
     except Exception as e:
         print(str(e))
         return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
-    except django.db.DatabaseError:
-        return JsonResponse({'status': 'error', 'message': 'Internal server error'},status=500)
 @login_required
 @csrf_protect
-@require_http_methods(["GET"])
+@require_GET
+@ratelimit(key='user',rate='120/m',block=True)
 def api_get_project_tasks(request,name):
     try:
         project = get_object_or_404(Project, name=name)
@@ -309,7 +313,6 @@ def get_project_owner_repo(project):
     if len(root_link_parts) < 5:
         return None, None
     return root_link_parts[3], root_link_parts[4]
-
 
 def fetch_github_tree_with_sizes(owner, repo, branch='main'):
     """
@@ -384,9 +387,10 @@ def get_project_tree_paths(project, branch='main'):
     cache.set(cache_key, formatted_tree, timeout=3600)
     return {item['path'] for item in formatted_tree}
 
-
+@login_required
 @csrf_exempt
-@require_http_methods(["POST"])
+@require_POST
+@ratelimit(key='user', rate='30/m', block=True)
 def api_add_project_task(request,name):
     try:
         data = json.loads(request.body)
@@ -431,6 +435,7 @@ def api_add_project_task(request,name):
 @login_required
 @csrf_protect
 @require_http_methods(["DELETE"])
+@ratelimit(key='user', rate='30/m', block=True)
 def api_remove_project_tasks(request,name):
     try:
         project = Project.objects.get(name=name)
@@ -454,8 +459,9 @@ def api_remove_project_tasks(request,name):
         return JsonResponse({'status':'error','message':'Internal server error'},status=500)
 
 @login_required
-@require_http_methods(["GET"])
-@ratelimit(key='user_or_ip', rate='10000/s', method='GET')
+@csrf_protect
+@require_GET
+@ratelimit(key='user', rate='120/m', block=True)
 def api_get_project_roles(request, name):
     try:
         project = Project.objects.get(name=name)
@@ -499,6 +505,7 @@ def filter_tree_by_path(request,tree, current_path):
     return result
 
 @login_required
+@csrf_exempt
 def handle_file_content(request,owner, repo, path, branch='main'):
     cache_key = f"github_file_{owner}_{repo}_{branch}_{path.replace('/', '_')}"
     cached_file = cache.get(cache_key)
@@ -576,6 +583,7 @@ def github_proxy_view(request, owner, repo, path=""):
 @login_required
 @csrf_exempt
 @require_POST
+@ratelimit(key='user', rate='20/m',block=True)
 def proxy_run_code(request):
     try:
         body = json.loads(request.body)
@@ -613,8 +621,9 @@ def proxy_run_code(request):
     except Exception as e:
         return JsonResponse({'error':'Internal server error','message':str(e)},status=500)
 @login_required
-@require_http_methods(["POST"])
 @csrf_exempt
+@require_POST
+@ratelimit(key='user', rate='30/m', block=True)
 def request_file_open(request):
     try:
         user = request.user
@@ -721,7 +730,9 @@ def request_file_open(request):
     except Exception as e:
         return JsonResponse({'error':str(e)},status=500)
 @login_required
-@require_http_methods(["GET"])
+@csrf_exempt
+@require_GET
+@ratelimit(key='user',rate='60/m',block=True)
 def api_get_availible_languages(request):
     cache_key = "cache_key_availible_languages"
     if request.GET.get('invalidate') == 'true':
@@ -788,7 +799,6 @@ def get_all_github_repo_branches(owner,repo):
     try:
         with transaction.atomic():
             url = f'https://api.github.com/repos/{owner}/{repo}/branches'
-            #https://repos/AxonsoftApplicationRaduBlendea/hsky8689-sys
             headers = {"Authorization": f"token {settings.GITHUB_TOKEN}"}
             meta_res = requests.get(url, headers=headers) if is_repo_private(owner,repo) else requests.get(url)
             if meta_res.ok:
@@ -801,7 +811,9 @@ def get_all_github_repo_branches(owner,repo):
         print(str(e))
         return []
 @login_required
+@csrf_exempt
 @require_GET
+@ratelimit(key='user', rate='60/m', block=True)
 def api_github_get_all_repo_branches(request):
     try:
         data = request.GET
@@ -827,7 +839,9 @@ def api_github_get_all_repo_branches(request):
         print(str(e))
         return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 @login_required
-@require_http_methods(["POST"])
+@csrf_exempt
+@require_POST
+@ratelimit(key='user',rate='20/m',block=True)
 def push_files(request):
     try:
         data = json.loads(request.body)
@@ -898,8 +912,9 @@ def push_files(request):
         return JsonResponse({'error':str(e)},status=500)
 
 @login_required
-@require_http_methods(["POST"])
 @csrf_protect
+@require_POST
+@ratelimit(key='user',rate='20/m',block=True)
 def api_add_project_role(request, project_id):
     try:
         project = get_object_or_404(Project, id=project_id)
@@ -939,8 +954,9 @@ def api_add_project_role(request, project_id):
         return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
 @login_required
-@require_http_methods(["POST"])
 @csrf_protect
+@require_POST
+@ratelimit(key='user',rate='20/m',block=True)
 def api_assign_users_to_role(request, id):
     try:
         project = get_object_or_404(Project,id=id)
@@ -977,8 +993,9 @@ def api_assign_users_to_role(request, id):
         return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
 @login_required
-@require_http_methods(["POST"])
 @csrf_protect
+@require_POST
+@ratelimit(key='user',rate='20/m',block=True)
 def api_share_file_access(request, name):
     try:
         project = get_object_or_404(Project, name=name)
@@ -1019,7 +1036,9 @@ def api_share_file_access(request, name):
         return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
 @login_required
+@csrf_protect
 @require_POST
+@ratelimit(key='user',rate='20/m',block=True)
 def api_request_project_join(request, project_id):
     try:
         project = get_object_or_404(Project, id=project_id)
@@ -1065,7 +1084,9 @@ def api_request_project_join(request, project_id):
         return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
 @login_required
+@csrf_protect
 @require_POST
+@ratelimit(key='user',rate='20/m',block=True)
 def api_handle_project_join_request(request):
     try:
         data = json.loads(request.body)
@@ -1119,7 +1140,9 @@ def api_handle_project_join_request(request):
         return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
 @login_required
+@csrf_protect
 @require_POST
+@ratelimit(key='user',rate='20/m',block=True)
 def api_handle_file_access_request(request):
     try:
         data = json.loads(request.body)
@@ -1198,6 +1221,7 @@ def api_handle_file_access_request(request):
 @login_required
 @csrf_protect
 @require_POST
+@ratelimit(key='user',rate='60/m',block=True)
 def api_request_file_share(request):
     try:
         data = json.loads(request.body)
@@ -1253,6 +1277,7 @@ def api_request_file_share(request):
 @login_required
 @csrf_protect
 @require_POST
+@ratelimit(key='user',rate='20/m',block=True)
 def api_handle_request_file_share(request):
     if not request.user.is_authenticated:
         return JsonResponse({
@@ -1317,7 +1342,6 @@ def api_handle_request_file_share(request):
     except Exception as e:
         print(str(e))
         return JsonResponse({'status': 'error', 'message': 'Internal server error'},status=500)
-
 def add_new_branch_to_repo(project,new_branch_name=None):
     try:
         owner,repo = get_project_owner_repo(project)
@@ -1391,8 +1415,10 @@ def delete_branch_from_repo(project,data):
     except Exception as e:
         print(str(e))
         return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
-#@login_required
+@login_required
+@csrf_protect
 @require_http_methods(["POST","PUT","DELETE"])
+@ratelimit(key='user',rate='15/m',block=True)
 def api_github_handle_branch_action(request,project,repo):
     method = request.method
     project = get_object_or_404(Project,name=project)

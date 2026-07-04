@@ -215,13 +215,6 @@ class UserExperienceSubsection(models.Model):
     start_date = models.DateField()
     end_date = models.DateField()
 
-class PostManager(models.Manager):
-    def find_user_posts(self,user_id):
-        return self.filter(user_id=user_id)
-class Post(models.Model):
-    description = models.CharField(max_length=500)
-    user = models.ForeignKey(User,on_delete=models.CASCADE)
-
 class RequestManager(models.Manager):
     def find_request(self,sender,receiver):
         try:

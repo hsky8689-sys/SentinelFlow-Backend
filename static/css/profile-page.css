@@ -90,17 +90,6 @@ hr { border: none; height: 2px; background: #3498db; }
     overflow-y:auto;
     overflow-x:hidden;
 }
-.user-posts{
-position:absolute;
-    bottom: -500px;
-    left: 400px;
-    background-color: yellow;
-    border-radius: 25px;
-    max-height: 1400px;
-    height: 75%;
-    overflow-y:auto;
-    overflow-x:hidden;
-}
 .skills-tab{
     position: absolute;
     bottom:-445px;

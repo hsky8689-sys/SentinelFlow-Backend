@@ -2,7 +2,7 @@ from django.http import JsonResponse
 from django.db.models import Q
 
 from projects.models import Project
-from users.models import User, Post
+from users.models import User
 
 
 class SearchFilterData():
@@ -16,10 +16,10 @@ class SearchFilterData():
         self.pages_number = 0
 class SearchManager():
     def __init__(self):
-        self.results = {'people':[],'posts':[],'projects':[]}
+        self.results = {'people':[],'projects':[]}
     def execute_search(self,filter_data):
         print("Executed query is "+filter_data.query)
-        self.results = {'people':[],'posts':[],'projects':[]}
+        self.results = {'people':[],'projects':[]}
         from devnetwork import settings
         if not filter_data.search_type in settings.SEARCH_TYPE:
             return JsonResponse({
@@ -34,17 +34,11 @@ class SearchManager():
             self.results['people']= people
         elif filter_data.search_type == 'PROJECTS':
             pass
-        elif filter_data.search_type == 'POSTS':
-            pass
         elif filter_data.search_type == 'ALL':
             self.results['people'] = list(User.objects.filter(
                 username__icontains=filter_data.query,
                 email__icontains=filter_data.query
             ).values('id', 'username', 'email')[:20])
-
-            self.results['posts'] = list(Post.objects.filter(
-               Q(description__icontains=filter_data.query)
-            ).values('id','user_id','description','user')[:20])
 
             self.results['projects'] = list(Project.objects.filter(
                 Q(name__icontains=filter_data.query)|

@@ -6,8 +6,9 @@ from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
-from django.views.decorators.http import require_http_methods
+from django.views.decorators.http import require_http_methods, require_GET, require_POST
 from django.db import transaction
+from django_ratelimit.decorators import ratelimit
 
 from projects.models import Project
 from .models import User, UserProfileSection, UserTechnicalSkillSection, UserTechnicalSkill, UserRequest, Friendship, \
@@ -16,10 +17,13 @@ from .search import SearchManager, SearchFilterData
 
 
 @login_required
+@csrf_protect
+@ratelimit(key='user', rate='60/m',method='GET',block=True)
 def search_page(request):
     return render(request, 'html/search.html', {'user_id': request.user.id})
 @login_required
 @csrf_protect
+@ratelimit(key='user', rate='30/m',method='POST',block=True)
 def search_api(request):
     if request.method == 'POST':
         try:
@@ -38,6 +42,7 @@ def search_api(request):
         except Exception as e:
             print(str(e))
             return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+@ratelimit(key='ip', rate='10/m', method='POST',block=True)
 def signup_page(request):
     if request.method == 'POST':
         username = request.POST['username']
@@ -61,13 +66,15 @@ def signup_page(request):
 
     return render(request, 'html/signup.html')
 @login_required
+@csrf_protect
+@require_GET
+@ratelimit(key='user', rate='120/m', block=True)
 def acces_profile(request,username):
     user = get_object_or_404(User,username=username)
     profile_stats = {
         "profile_sections":[],
         "teckstack_category":{},
         "profile_projects":[],
-        "user_posts":[],
     }
     if request.user.username == username:
         profile_stats["profile_sections"] = (UserProfileSection.
@@ -109,7 +116,6 @@ def acces_profile(request,username):
         "profile_sections":profile_stats["profile_sections"],
         "techstack_category":profile_stats["techstack_category"],
         "user_projects":profile_stats["profile_projects"],
-        "user_posts":profile_stats["user_posts"],
         "is_owner":request.user.username == username,
         "sent_to_him": sent_to_him,
         "received_from_him": received_from_him,
@@ -136,7 +142,11 @@ def login_page(request):
         if request.user.is_authenticated:
             logout(request)
         return render(request, "html/login.html")
+@login_required
+@csrf_protect
 @require_http_methods(["GET","POST"])
+@ratelimit(key='user', rate='60/m', method='GET',block=True)
+@ratelimit(key='user', rate='20/m', method='POST',block=True)
 def create_project(request):
     if request.method == 'GET':
         return render(request,'html/create_project.html',{"user_id":request.user.id})
@@ -146,9 +156,11 @@ def create_project(request):
         user_id = request.user.id
         Project.objects.create_project(user_id,name, description)
         return acces_profile(request,request.user.username)
-@require_http_methods(["POST"])
+@login_required
 @csrf_protect
+@require_POST
 @transaction.atomic
+@ratelimit(key='user',rate='30/m',block=True)
 def api_add_skill(request):
     name = request.POST.get('name')
     section_id = request.POST.get('section_id')
@@ -162,9 +174,11 @@ def api_add_skill(request):
         return JsonResponse({'status': 'success','message':'Skill was succsesfully added'},status=200)
     else:
         return JsonResponse({'status': 'error','message':'Skill was already added before'},status=500)
-@require_http_methods(["DELETE"])
+@login_required
 @csrf_protect
+@require_http_methods(["DELETE"])
 @transaction.atomic
+@ratelimit(key='user',rate='30/m',block=True)
 def api_delete_skill(request,skill_id):
     try:
         skill = UserTechnicalSkill.objects.get(id=skill_id)
@@ -172,8 +186,10 @@ def api_delete_skill(request,skill_id):
         return JsonResponse({'status': 'success'})
     except UserTechnicalSkill.DoesNotExist:
         return JsonResponse({'status':'error','message':'Skill not found'},status=404)
-@require_http_methods(["POST"])
 @login_required
+@csrf_protect
+@require_POST
+@ratelimit(key='user',rate='20/m',block=True)
 def api_send_friend_request(request,receiver):
     try:
         user = User.objects.get(id=receiver)
@@ -188,8 +204,10 @@ def api_send_friend_request(request,receiver):
     except Exception as e:
         print(f"Eroare API: {str(e)}")
         return JsonResponse({'status': 'error', 'message': 'Internal Server Error'}, status=500)
-@require_http_methods(["POST"])
 @login_required
+@csrf_protect
+@require_POST
+@ratelimit(key='user',rate='20/m',block=True)
 def api_accept_friend_request(request,sender):
     try:
         user = User.objects.get(id=sender)
@@ -213,7 +231,9 @@ def api_accept_friend_request(request,sender):
         print(f"Eroare API: {str(e)}")
         return JsonResponse({'status': 'error', 'message': 'Internal Server Error'}, status=500)
 @login_required
+@csrf_protect
 @transaction.atomic
+@ratelimit(key='user',rate='20/m',method='POST',block=True)
 def api_remove_friend(request,removed):
     try:
         removed = User.objects.get(id=removed)
@@ -233,7 +253,9 @@ def api_remove_friend(request,removed):
         print(str(e))
         return JsonResponse({'status': 'error', 'message': 'Internal Server Error'}, status=500)
 @login_required
-@transaction.atomic
+@csrf_protect
+@require_POST
+@ratelimit(key='user',rate='20/m',block=True)
 def api_cancel_request(request,id):
     try:
         user = User.objects.get(id=id)
@@ -248,6 +270,9 @@ def api_cancel_request(request,id):
         print(str(e))
         return JsonResponse({'status': 'error', 'message': 'Internal Server Error'}, status=500)
 @login_required
+@csrf_protect
+@require_GET
+@ratelimit(key='user',rate='60/m',block=True)
 def connections_page(request):
     try:
         requests = UserRequest.objects.get_user_requests(request.user)
