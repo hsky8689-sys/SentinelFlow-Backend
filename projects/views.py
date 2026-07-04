@@ -536,7 +536,7 @@ def invalidate_repo_cache(repo:str,owner:str):
 @login_required
 def github_proxy_view(request, owner, repo, path=""):
     #invalidate_repo_cache(repo,owner)
-    branch = request.GET.get('branch') or "main"
+    branch = request.GET.get('branch') or get_default_branch(owner, repo) or "main"
     if path != "" and '.' in path.split('/')[-1]:
         return handle_file_content(request,owner, repo, path, branch)
 

@@ -113,6 +113,13 @@ async function displayFileContent(path){
             if(requestAccessBtn) requestAccessBtn.style.display = 'inline-block';
             return;
         }
+        if(!response.ok){
+            const errorBody = await response.json().catch(() => ({}));
+            console.error("Eroare la fișier:", response.status, errorBody);
+            renderCode('');
+            alert(`Nu am putut încărca fișierul (${response.status}).`);
+            return;
+        }
         const data = await response.json();
         const base64content = data.content.replace(/\s/g, '');
         const decodedContent = decodeURIComponent(escape(atob(base64content)));
