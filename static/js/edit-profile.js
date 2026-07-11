@@ -65,7 +65,7 @@ async function addSkill(categoryId){
         formData.append('section_id',categoryId);
 
         try{
-            const response = await fetch(`/users/api/add-skill/`,{
+            const response = await fetch(`/users/skills/`,{
                 method:'POST',
                 body:formData,
                 headers:{
@@ -85,7 +85,7 @@ async function addSkill(categoryId){
         }
 async function deleteSkill(skillId) {
             if (confirm('Ștergi skill-ul?')) {
-                await fetch(`/api/delete-skill/${skillId}/`, {
+                await fetch(`/users/skills/${skillId}/`, {
                 method: 'DELETE',
                 headers: { 'X-CSRFToken': getCookie('csrftoken') }
             });
@@ -95,25 +95,30 @@ async function deleteSkill(skillId) {
 async function handleFriendRequest(action,id){
     try{
         var desiredUrl = ``;
+        var method = 'POST';
+        var body = null;
         switch (action) {
             case 'send':{
-                desiredUrl = `/users/${id}/send-friend-request/`;
+                desiredUrl = `/users/friend-requests/`;
+                method = 'POST';
+                body = JSON.stringify({receiver_id: id});
                 break;
             }
             case 'accept':{
-                desiredUrl=`/users/${id}/accept-friend-request/`;
+                desiredUrl = `/users/friend-requests/${id}/`;
+                method = 'PATCH';
+                body = JSON.stringify({status: 'accepted'});
                 break;
             }
-            case 'deny':{
-                desiredUrl=`/users/${id}/deny-friend-request/`;
+            case 'deny':
+            case 'cancel':{
+                desiredUrl = `/users/friend-requests/${id}/`;
+                method = 'DELETE';
                 break;
             }
             case 'remove':{
-                desiredUrl = `/users/${id}/remove-friend/`;
-                break;
-            }
-            case 'cancel':{
-                desiredUrl = `/users/${id}/cancel-request/`
+                desiredUrl = `/users/${id}/friendship/`;
+                method = 'DELETE';
                 break;
             }
             default:{
@@ -122,8 +127,9 @@ async function handleFriendRequest(action,id){
             }
         }
         const response = await fetch(desiredUrl,{
-                method: 'POST',
-                headers: { 'X-CSRFToken': getCookie('csrftoken')}
+                method: method,
+                headers: { 'X-CSRFToken': getCookie('csrftoken'), 'Content-Type': 'application/json' },
+                body: body
                 });
         if(response.ok){
             location.reload();

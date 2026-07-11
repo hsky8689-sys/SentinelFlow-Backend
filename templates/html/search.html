@@ -5,12 +5,12 @@
     <meta charset="UTF-8">
     <title>Search page</title>
     <link rel="stylesheet" href="{% static 'css/search-page.css' %}">
-    <script src="{% static 'js/search-page.js' %}" defer></script>
+    <script src="{% static 'js/search-page.js' %}" type="module"></script>
 </head>
 <body>
     <div class="header-bar">
         <input type="text" id="searchbar" placeholder="Type something to search" class="search-bar">
-        <button class="search-button" onclick="searchQuery()">Search</button>
+        <button class="search-button">Search</button>
     </div>
     <div class="content">
         <div class="suggested-friends">

@@ -11,17 +11,31 @@
         <div class="project-related-posts">
             <div class="project-actions">
             {% if stats.role == 'visitor' %}
-    <button class="btn btn-primary" id="join-btn" onclick="requestJoin({{ stats.project_id }})">Request Join</button>
+    <button class="btn btn-primary" id="join-btn" onclick="requestJoin({{stats.project_id}})">Request Join</button>
 {% elif has_pending_request %}
     <button class="btn btn-secondary" disabled>Join Request Pending...</button>
 {% else %}
-    <button class="btn btn-danger" onclick="leaveProject({{ stats.project_id }})">Leave Project</button>
+    <button class="btn btn-danger" onclick="leaveProject({{stats.project_id}})">Leave Project</button>
 {% endif %}
 </div>
             <h1>Project description</h1>
             <br>
             <h2>{{stats.description}}</h2>
             <hr>
+            {% if stats.repos %}
+            <select id="repo-select" onchange="onRepoChange(this.value)">
+                {% for repo in stats.repos %}
+                <option value="{{ repo.id }}" data-owner="{{ repo.owner }}" data-repo="{{ repo.repo }}" {% if repo.id == stats.active_repo_id %}selected{% endif %}>{{ repo.name }}</option>
+                {% endfor %}
+            </select>
+            {% endif %}
+            {% if stats.branches %}
+            <select id="branch-select" onchange="onBranchChange(this.value)">
+                {% for branch in stats.branches %}
+                <option value="{{ branch }}">{{ branch }}</option>
+                {% endfor %}
+            </select>
+            {% endif %}
             <div id="project-structure">
                 <h1>Loading files...</h1>
             </div>
@@ -86,11 +100,16 @@
 
                     </textarea>
                     <div style="margin-top: 10px;">
+                        {% if stats.visitor_permissions.can_execute_code %}
                         <button onclick="runCode()" style="padding: 10px; background: #28a745; color: white; border: none; cursor: pointer;">
                             ▶ Run Code
                         </button>
-                        <button onclick="makeCommit()" style="padding: 10px; background: #28a745; color: white; border: none; cursor: pointer;">
+                        {% endif %}
+                        <button id="commit-changes-btn" onclick="makeCommit()" style="padding: 10px; background: #28a745; color: white; border: none; cursor: pointer; display:none;">
                             ▶ Commit changes
+                        </button>
+                        <button id="request-access-btn" onclick="requestAccessToActiveFile()" style="padding: 10px; background: #ffc107; color: black; border: none; cursor: pointer; display:none;">
+                            🔒 Request acces
                         </button>
                     </div>
                     <div style="background: #1e1e1e; color: #00ff00; padding: 15px; margin-top: 10px; height: 150px; overflow-y: auto; font-family: monospace;">

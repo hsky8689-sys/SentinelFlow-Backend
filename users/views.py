@@ -7,6 +7,10 @@ from django.http import JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+from django.views.decorators.csrf import csrf_exempt, csrf_protect
+from django.views.decorators.http import require_http_methods, require_GET, require_POST
+from django.db import transaction
+from django_ratelimit.decorators import ratelimit
 
 from projects.models import Project
 from .models import User, UserProfileSection, UserTechnicalSkillSection, UserTechnicalSkill, UserRequest, Friendship, \
@@ -14,12 +18,14 @@ from .models import User, UserProfileSection, UserTechnicalSkillSection, UserTec
 from .search import SearchManager, SearchFilterData
 
 
-# Create your views here.
 @login_required
+@csrf_protect
+@ratelimit(key='user', rate='60/m',method='GET',block=True)
 def search_page(request):
     return render(request, 'html/search.html', {'user_id': request.user.id})
 @login_required
-@csrf_exempt
+@csrf_protect
+@ratelimit(key='user', rate='30/m',method='POST',block=True)
 def search_api(request):
     if request.method == 'POST':
         try:
@@ -38,6 +44,7 @@ def search_api(request):
         except Exception as e:
             print(str(e))
             return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+@ratelimit(key='ip', rate='10/m', method='POST',block=True)
 def signup_page(request):
     if request.method == 'POST':
         username = request.POST['username']
@@ -61,13 +68,15 @@ def signup_page(request):
 
     return render(request, 'html/signup.html')
 @login_required
+@csrf_protect
+@require_GET
+@ratelimit(key='user', rate='120/m', block=True)
 def acces_profile(request,username):
     user = get_object_or_404(User,username=username)
     profile_stats = {
         "profile_sections":[],
         "teckstack_category":{},
         "profile_projects":[],
-        "user_posts":[],
     }
     if request.user.username == username:
         profile_stats["profile_sections"] = (UserProfileSection.
@@ -84,6 +93,7 @@ def acces_profile(request,username):
     are_friends = False
     profile_picture = ''
     background_picture = ''
+    friendship_request = None
     try:
         friendship_request = UserRequest.objects.find_request(request.user, user).first()
         friendship = Friendship.objects.find_friendship(request.user,user).first()
@@ -109,16 +119,20 @@ def acces_profile(request,username):
         "profile_sections":profile_stats["profile_sections"],
         "techstack_category":profile_stats["techstack_category"],
         "user_projects":profile_stats["profile_projects"],
-        "user_posts":profile_stats["user_posts"],
         "is_owner":request.user.username == username,
         "sent_to_him": sent_to_him,
         "received_from_him": received_from_him,
         "friends": are_friends,
+        "friendship_request_id": friendship_request.id if friendship_request else None,
     }
     return render(request, "html/profile.html", context)
 @login_required
 def inbox_page(request):
     pass
+@require_http_methods(["POST","GET"])
+@ratelimit(key='ip',rate='10/m',method='POST',block=True)
+@ratelimit(key='post:username',rate='5/m',method='POST',block=True)
+@ratelimit(key='user_or_ip',rate='20/m',method='GET',block=True)
 def login_page(request):
     if request.method == "POST":
         if request.user.is_authenticated:
@@ -136,7 +150,11 @@ def login_page(request):
         if request.user.is_authenticated:
             logout(request)
         return render(request, "html/login.html")
+@login_required
+@csrf_protect
 @require_http_methods(["GET","POST"])
+@ratelimit(key='user', rate='60/m', method='GET',block=True)
+@ratelimit(key='user', rate='20/m', method='POST',block=True)
 def create_project(request):
     if request.method == 'GET':
         return render(request,'html/create_project.html',{"user_id":request.user.id})
@@ -144,10 +162,16 @@ def create_project(request):
         name = request.POST['name']
         description = request.POST['description']
         user_id = request.user.id
-        Project.objects.create_project(user_id,name, description)
+        project = Project.objects.create_project(user_id,name, description)
+        if project is None:
+            messages.error(request, 'Numele de proiect este deja folosit sau invalid (doar litere, cifre, "-" și "_").')
+            return render(request,'html/create_project.html',{"user_id":request.user.id})
         return acces_profile(request,request.user.username)
-@require_http_methods(["POST"])
-@csrf_exempt
+@login_required
+@csrf_protect
+@require_POST
+@transaction.atomic
+@ratelimit(key='user',rate='30/m',block=True)
 def api_add_skill(request):
     name = request.POST.get('name')
     section_id = request.POST.get('section_id')
@@ -157,9 +181,15 @@ def api_add_skill(request):
         return JsonResponse({'status': 'error', 'message': 'Date lipsă'}, status=400)
 
     success = UserTechnicalSkill.objects.add_user_skill(name=name, section_id=section_id)
-    return JsonResponse({'status': 'success' if success else 'error'})
+    if success:
+        return JsonResponse({'status': 'success','message':'Skill was succsesfully added'},status=200)
+    else:
+        return JsonResponse({'status': 'error','message':'Skill was already added before'},status=500)
+@login_required
+@csrf_protect
 @require_http_methods(["DELETE"])
-@csrf_exempt
+@transaction.atomic
+@ratelimit(key='user',rate='30/m',block=True)
 def api_delete_skill(request,skill_id):
     try:
         skill = UserTechnicalSkill.objects.get(id=skill_id)
@@ -167,49 +197,61 @@ def api_delete_skill(request,skill_id):
         return JsonResponse({'status': 'success'})
     except UserTechnicalSkill.DoesNotExist:
         return JsonResponse({'status':'error','message':'Skill not found'},status=404)
-@require_http_methods(["POST"])
 @login_required
-def api_send_friend_request(request,receiver):
+@csrf_protect
+@require_POST
+@ratelimit(key='user',rate='20/m',block=True)
+def api_friend_requests(request):
     try:
-        # get() aruncă User.DoesNotExist dacă nu găsește, deci nu e nevoie de "is None"
-        user = User.objects.get(id=receiver)
+        data = json.loads(request.body)
+        user = User.objects.get(id=data.get('receiver_id'))
         if user == request.user:
             return JsonResponse({'status': 'error', 'message': "Cannot send request to self"}, status=400)
-        # Trimiți obiectul request.user, nu request.user.id
         sent = UserRequest.objects.send_friend_request(request.user, user)
         if sent is None:
             return JsonResponse({'status': 'error', 'message': 'Request already exists or failed'}, status=400)
-        # Aici aveai status 404 pentru "succes", l-am schimbat in 200
-        return JsonResponse({'status': 'succes', 'code': 200})
+        return JsonResponse({'status': 'succes', 'code': 200, 'id': sent.id})
     except User.DoesNotExist:
         return JsonResponse({'status': 'error', 'message': 'User not found'}, status=404)
     except Exception as e:
         print(f"Eroare API: {str(e)}")
-        # Acum view-ul returnează un JSON chiar și când crapă ceva, evitând eroarea 500 în browser
         return JsonResponse({'status': 'error', 'message': 'Internal Server Error'}, status=500)
-@require_http_methods(["POST"])
 @login_required
-def api_accept_friend_request(request,sender):
+@csrf_protect
+@require_http_methods(["PATCH","DELETE"])
+@ratelimit(key='user',rate='20/m',block=True)
+def api_friend_request_detail(request,id):
     try:
-        user = User.objects.get(id=sender)
-        if user == request.user:
-            return JsonResponse({'status': 'error', 'message': "Cannot accept request from self"}, status=400)
-        friend_request = UserRequest.objects.find_request(user,request.user)
+        friend_request = UserRequest.objects.filter(id=id,request_type='friend').first()
         if friend_request is None:
-            return  JsonResponse({'status':'error','message':'No request received from certain user'},status=404)
-        if friend_request.first().status != 'pending':
-            return JsonResponse({'status': 'error', 'message': 'Request has already been handled'}, status=403)
-        sent = UserRequest.objects.accept_request(friend_request.first())
-        UserRequest.objects.remove_request(friend_request.first())
-        if sent is None:
-            return JsonResponse({'status': 'error', 'message': 'Request already exists or failed'}, status=400)
-        return JsonResponse({'status': 'succes', 'code': 200})
-    except User.DoesNotExist:
-        return JsonResponse({'status': 'error', 'message': 'User not found'}, status=404)
+            return JsonResponse({'status': 'error', 'message': 'Request does not exist'}, status=404)
+        if request.user.id not in (friend_request.sender_id, friend_request.receiver_id):
+            return JsonResponse({'status': 'error', 'message': 'Not part of this request'}, status=403)
+        match request.method:
+            case "PATCH":
+                if friend_request.receiver_id != request.user.id:
+                    return JsonResponse({'status': 'error', 'message': 'Only the receiver can accept this request'}, status=403)
+                if friend_request.status != 'pending':
+                    return JsonResponse({'status': 'error', 'message': 'Request has already been handled'}, status=403)
+                data = json.loads(request.body or '{}')
+                if data.get('status') != 'accepted':
+                    return JsonResponse({'status': 'error', 'message': 'Unsupported status transition'}, status=400)
+                sent = UserRequest.objects.accept_request(friend_request)
+                if sent is None:
+                    return JsonResponse({'status': 'error', 'message': 'Request has not been sent'}, status=500)
+                UserRequest.objects.remove_request(friend_request)
+                return JsonResponse({'status': 'succes', 'message': 'Request accepted'}, status=200)
+            case "DELETE":
+                UserRequest.objects.remove_request(friend_request)
+                return JsonResponse({'status': 'succes', 'message': 'Request was removed'}, status=200)
     except Exception as e:
-        print(f"Eroare API: {str(e)}")
+        print(str(e))
         return JsonResponse({'status': 'error', 'message': 'Internal Server Error'}, status=500)
 @login_required
+@csrf_protect
+@require_http_methods(["DELETE"])
+@transaction.atomic
+@ratelimit(key='user',rate='20/m',block=True)
 def api_remove_friend(request,removed):
     try:
         removed = User.objects.get(id=removed)
@@ -218,7 +260,9 @@ def api_remove_friend(request,removed):
         friendship = Friendship.objects.find_friendship(request.user,removed)
         if friendship is None:
             return JsonResponse({'status': 'error', 'message': 'Friendship does not exist'}, status=404)
-        Friendship.objects.remove_friendship(request.user,removed)
+        removed_friendship = Friendship.objects.remove_friendship(request.user,removed)
+        if not removed_friendship:
+            return JsonResponse({'status': 'error', 'message': 'Friendship not found or already removed'}, status=404)
         friendship_request = UserRequest.objects.find_request(request.user,removed)
         if len(list(friendship_request))>0:
             UserRequest.objects.remove_request(friendship_request.first())
@@ -227,20 +271,9 @@ def api_remove_friend(request,removed):
         print(str(e))
         return JsonResponse({'status': 'error', 'message': 'Internal Server Error'}, status=500)
 @login_required
-def api_cancel_request(request,id):
-    try:
-        user = User.objects.get(id=id)
-        if user is None:
-            return JsonResponse({'status': 'error', 'message': 'User does not exist'}, status=404)
-        request = UserRequest.objects.find_request(request.user,user)
-        if request is None:
-            return JsonResponse({'status': 'error', 'message': 'Request does not exist'}, status=404)
-        UserRequest.objects.remove_request(request)
-        return JsonResponse({'status': 'succes', 'message': 'Request was removed'}, status=200)
-    except Exception as e:
-        print(str(e))
-        return JsonResponse({'status': 'error', 'message': 'Internal Server Error'}, status=500)
-@login_required
+@csrf_protect
+@require_GET
+@ratelimit(key='user',rate='60/m',block=True)
 def connections_page(request):
     try:
         requests = UserRequest.objects.get_user_requests(request.user)

@@ -7,11 +7,6 @@
       <jdbc-driver>org.sqlite.JDBC</jdbc-driver>
       <jdbc-url>jdbc:sqlite:C:\Users\unu\PycharmProjects\devnetwork\db.sqlite3</jdbc-url>
       <working-dir>$ProjectFileDir$</working-dir>
-      <libraries>
-        <library>
-          <url>file://$APPLICATION_CONFIG_DIR$/jdbc-drivers/Xerial SQLiteJDBC/3.51.1/org/xerial/sqlite-jdbc/3.51.1.0/sqlite-jdbc-3.51.1.0.jar</url>
-        </library>
-      </libraries>
     </data-source>
     <data-source source="LOCAL" name="devnetwork@localhost" uuid="010c80ef-ecce-40eb-83fc-59f51a290b01">
       <driver-ref>postgresql</driver-ref>

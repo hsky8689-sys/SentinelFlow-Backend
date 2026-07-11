@@ -1,11 +1,24 @@
-import { getCookie } from './fetching-utils';
+import { getCookie } from './fetching-utils.js';
+document.addEventListener('DOMContentLoaded', () => {
+    const searchBtn = document.querySelector(".search-button");
+    const searchBar = document.getElementById('searchbar');
+    if (searchBtn) {
+        searchBtn.addEventListener('click', () => {
+            searchQuery();
+        });
+    }
+    if (searchBar) {
+        searchBar.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') searchQuery();
+        });
+    }
+});
 async function searchQuery(){
              const query = document.getElementById("searchbar").value.trim();
              if(!query){
                 alert('search for something!!');
                 return;
              }
-             query.innerHTML='';
              try{
                 const response = await fetch('/users/search/api/',{
                     method:'POST',
@@ -19,6 +32,7 @@ async function searchQuery(){
                 if(data.status === 'success'){
                     displayResults(data.results);
                 }
+                else throw new Error("Nu a mers cautarea...");
             }catch (error){
                 alert('Error: '+error)
              }

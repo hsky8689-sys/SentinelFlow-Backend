@@ -60,12 +60,25 @@ async function goToProjectMembersPage(project_name){
 async function goToProjectSettings(project_name){
     const desiredUrl = `/projects/project-page/${project_name}/settings/`;
     const bailoutUrl = location.href;
+    let proj = window.djangoContext.project;
+    const repo_name = proj.repo_name;
+    const owner_username = proj.owner_username;
+    if(localStorage.getItem("repo_name") === null) localStorage.setItem("repo_name",repo_name);
+    if(localStorage.getItem("owner_username") === null) localStorage.setItem("owner_username",owner_username);
     try{
         const response = await fetch(desiredUrl, {
             headers: { 'X-Requested-With': 'XMLHttpRequest' }
         });
         if (response.ok) {
             location.href = desiredUrl;
+            if(!window.djangoContext){
+                alert("Nu mai ajunge djangoContext in setari");
+            }
+            else{
+                proj.owner_username=localStorage.getItem("repo_name");
+                proj.repo_name=localStorage.getItem("owner_username");
+                alert(localStorage.getItem("repo_name")+" "+localStorage.getItem("owner_username"));
+            }
         } else {
             alert('Nu ai permisiunea sau pagina nu există.');
         }
@@ -158,7 +171,7 @@ async function runCode(){
         consoleOutput.innerText = "Te rog să scrii niște cod mai întâi.";
         return;
     }
-    consoleOutput.innerText = "Se execută pe server... ⏳";
+    consoleOutput.innerText = "Se execută pe server...";
     try {
         const response = await fetch('/projects/api/run-code/', {
             method: 'POST',
@@ -168,9 +181,17 @@ async function runCode(){
             },
             body: JSON.stringify({
                 source_code: sourceCode,
-                language_id: selectedLanguage
+                language_id: selectedLanguage,
+                project: window.djangoContext.project.name
             })
         });
+
+        if (response.status === 403) {
+            const denied = await response.json();
+            consoleOutput.style.color = "#ff4c4c";
+            consoleOutput.innerText = denied.error || "Nu ai permisiunea să rulezi cod în acest proiect.";
+            return;
+        }
 
         const result = await response.json();
 
@@ -205,7 +226,6 @@ async function requestJoin(projectId) {
     joinBtn.textContent = 'Se trimite...';
 
     try {
-        // ATENȚIE: URL-ul trebuie să se potrivească 1:1 cu urls.py (am pus slash la final preventiv, modifică dacă e fără)
         const response = await fetch(`/projects/api/${projectId}/request-join`, {
             method: 'POST',
             headers: {

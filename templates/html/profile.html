@@ -19,10 +19,10 @@
                     <button class="add-friend remove-btn" onclick="handleFriendRequest('remove', '{{ id }}')">Remove Friend</button>
                 {% elif sent_to_him %}
                     <button class="add-friend status-pending" disabled>Request Sent...</button>
-                    <button class="add-friend cancel-btn" onclick="handleFriendRequest('cancel', '{{ id }}')">Cancel Request</button>
+                    <button class="add-friend cancel-btn" onclick="handleFriendRequest('cancel', '{{ friendship_request_id }}')">Cancel Request</button>
                 {% elif received_from_him %}
-                    <button class="add-friend accept-btn" onclick="handleFriendRequest('accept', '{{ id }}')">Accept Request</button>
-                    <button class="add-friend deny-btn" onclick="handleFriendRequest('deny', '{{ id }}')">Deny</button>
+                    <button class="add-friend accept-btn" onclick="handleFriendRequest('accept', '{{ friendship_request_id }}')">Accept Request</button>
+                    <button class="add-friend deny-btn" onclick="handleFriendRequest('deny', '{{ friendship_request_id }}')">Deny</button>
                 {% else %}
                     <button class="add-friend" onclick="handleFriendRequest('send', '{{ id }}')">Add Friend</button>
                 {% endif %}
@@ -73,8 +73,5 @@
          {% empty %}
                 <h2>This user didn't participate in any community projects</h2>
          {% endfor %}
-    </div>
-    <div class="user-posts">
-        
     </div>
     {% endblock %}

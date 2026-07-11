@@ -9,6 +9,7 @@
     <script src="{% static 'js/edit-profile.js' %}" defer></script>
     <script src="{% static 'js/project-settings-page.js' %}" defer></script>
     <script src="{% static 'js/project-files.js' %}"></script>
+    {{ stats.files_permissions|json_script:"files-permissions-data" }}
     <script>
     window.djangoContext = {
         project: {
@@ -20,7 +21,7 @@
         user: {
             username: "{{ stats.user_username|escapejs }}",
             role: "{{ stats.role|escapejs }}",
-            permissions:"{{ stats.permissions|escapejs }}"
+            file_permissions: JSON.parse(document.getElementById('files-permissions-data').textContent)
         }
     };
     </script>

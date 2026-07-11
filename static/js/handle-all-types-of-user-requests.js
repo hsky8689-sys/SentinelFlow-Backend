@@ -39,6 +39,7 @@ async function handleProjectJoinRequest(senderId, receiverId, action) {
         console.error('Eroare:', error);
     }
 }
+<<<<<<< HEAD
 async function handleFriendRequestFromConversations(senderId, receiverId, action) {
     if (!action) return;
 
@@ -46,20 +47,26 @@ async function handleFriendRequestFromConversations(senderId, receiverId, action
         const desiredUrl = action === 'accept' ? `/users/${senderId}/accept-friend-request/` : `/users/${senderId}/accept-friend-request/`
         const response = await fetch(desiredUrl, {
             method: 'POST',
+=======
+
+async function handleFriendRequest(requestId, action) {
+    if (!action) return;
+
+    try {
+        const isAccept = action === 'accept';
+        const response = await fetch(`/users/friend-requests/${requestId}/`, {
+            method: isAccept ? 'PATCH' : 'DELETE',
+>>>>>>> 15f441b3cfedabe4288c2707d48d6c3421b903d5
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRFToken': getCookie('csrftoken')
             },
-            body: JSON.stringify({
-                'sender_id': senderId,
-                'receiver_id': receiverId,
-                'action': action
-            })
+            body: isAccept ? JSON.stringify({status: 'accepted'}) : null
         });
         const data = await response.json();
 
-        if (data.status === 'success') {
-            document.getElementById(`req-friend-${senderId}-${receiverId}`).remove();
+        if (data.status === 'succes' || data.status === 'success') {
+            document.getElementById(`req-friend-${requestId}`).remove();
         } else {
             alert(data.message);
         }

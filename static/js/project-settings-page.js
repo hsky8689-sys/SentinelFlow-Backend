@@ -9,7 +9,7 @@ async function loadProjectStatsSection(){
                 <label htmlFor="project-description">Project description</label><input id="project-desctiption" name="project-description" type="text"/><br>
                 <label for="is-private">Is project private(can be accessed via invite only and is hidden to the search engine)</label><input id="is-private" name="privacy" type="checkbox"/><br>
                 <h1>Project domains</h1>`;
-                try{  const apiUrl = '/projects/settings/'+djangoContext.project.name+'/api-project-domains';
+                try{  const apiUrl = '/projects/settings/'+djangoContext.project.id+'/domains/';
                   const domain_tags =
                     await fetch(apiUrl, {headers: { 'X-Requested-With': 'XMLHttpRequest' }
                   });
@@ -40,7 +40,7 @@ async function loadProjectStatsSection(){
             content +=  `</div>`;
             content += `<h1>Project techstack requirements</h1>`;
             try{
-                const desiredUrl = `/projects/settings/${window.djangoContext.project.name}/api-get-project-requirements`;
+                const desiredUrl = `/projects/settings/${window.djangoContext.project.id}/requirements/`;
                 const response = await fetch(desiredUrl,
                 {headers: { 'X-Requested-With': 'XMLHttpRequest'}
                 });
@@ -90,7 +90,7 @@ async function loadTaskAdministrationSection(){
     area.innerHTML = '';
     let newHtml = '';
     try{
-        const desiredUrl = `/projects/settings/${djangoContext.project.name}/api-get-project-tasks`;
+        const desiredUrl = `/projects/settings/${djangoContext.project.id}/tasks/`;
         const response = await fetch(desiredUrl,
             {
                     method: 'GET',
@@ -115,6 +115,11 @@ async function loadTaskAdministrationSection(){
             else{
                 newHtml += `<p>No tasks added to this project...</p><br>`;
             }
+            const [memberOptionsHtml, resourceOptionsHtml] = await Promise.all([
+                buildProjectMembersOptions(),
+                buildProjectResourceOptions()
+            ]);
+
             newHtml += `<form id="new-task" method="POST" onsubmit="addTask()">
                                 <label for="title">Task title</label><br>
                                 <input type="text" id="title" placeholder="Enter a title for the new task"/><br>
@@ -124,11 +129,15 @@ async function loadTaskAdministrationSection(){
                                 <input type="date" id="start-date"/>
                                 <label for="end-date"></label><br>
                                 <input type="date" id="end-date"/><br>
+                                <label for="task-users">Users with access to this task</label><br>
+                                <select id="task-users" multiple size="6">${memberOptionsHtml}</select><br>
+                                <label for="task-resources">Files/folders affiliated with this task</label><br>
+                                <select id="task-resources" multiple size="6">${resourceOptionsHtml}</select><br>
                                 <button>Add task</button>
                         </form>
                         <button onclick="removeTasks()">Remove tasks</button>`;
             newHtml += `<div id="pending-tasks" style="display: grid;gap=10px;margin: 10px;">
-                             
+
                         </div>`;
         }
         area.innerHTML = newHtml;
@@ -136,9 +145,44 @@ async function loadTaskAdministrationSection(){
         alert(error);
     }
 }
+async function buildProjectMembersOptions(){
+    try{
+        const url = `/projects/settings/${djangoContext.project.id}/roles/`;
+        const response = await fetch(url, {
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            }
+        });
+        if(!response.ok) return '';
+        const data = await response.json();
+        const usernames = new Set();
+        (data.roles || []).forEach(role => (role.users || []).forEach(u => usernames.add(u)));
+        return Array.from(usernames).map(u => `<option value="${u}">${u}</option>`).join('');
+    }catch (error){
+        console.error("Could not load project members:", error);
+        return '';
+    }
+}
+async function buildProjectResourceOptions(){
+    try{
+        const owner = localStorage.getItem("owner_username");//djangoContext.project.owner_username;
+        const repo = localStorage.getItem("repo_name");//djangoContext.project.repo_name;
+        alert(owner+" din buildResource "+repo+" tot asa");
+        const url = `/projects/api/github/${owner}/${repo}/`;
+        const response = await fetch(url);
+        if(!response.ok) return '';
+        const tree = await response.json();
+        if(!Array.isArray(tree)) return '';
+        return tree.map(item => `<option value="${item.path}">${item.path} (${item.type})</option>`).join('');
+    }catch (error){
+        console.error("Could not load project file tree:", error);
+        return '';
+    }
+}
 async function removeTasks(){
     try{
-        const desiredUrl = `/projects/settings/${window.djangoContext.project.name}/api-remove-tasks`;
+        const desiredUrl = `/projects/settings/${window.djangoContext.project.id}/tasks/`;
         const removed = JSON.parse(localStorage.getItem('removedTasks') || '[]');
         const response = await fetch(desiredUrl,
             {
@@ -187,15 +231,18 @@ function renderPendingTasks(){
 async function addTask(){
     event.preventDefault();
      const form = document.getElementById("new-task");
-     const formData = new FormData(form);
+     const selectedUsers = Array.from(document.getElementById('task-users').selectedOptions).map(o => o.value);
+     const selectedResources = Array.from(document.getElementById('task-resources').selectedOptions).map(o => o.value);
      const data = {
         title: document.getElementById('title').value,
         description: document.getElementById('description').value,
         start_date: document.getElementById('start-date').value,
         end_date: document.getElementById('end-date').value,
+        usernames: selectedUsers,
+        resource_paths: selectedResources,
      };
      try{
-        const desiredUrl = `/projects/settings/${djangoContext.project.name}/api-add-task`;
+        const desiredUrl = `/projects/settings/${djangoContext.project.id}/tasks/`;
         const response = await fetch(desiredUrl, {
             method: 'POST',
             headers: {
@@ -314,7 +361,7 @@ async function addSectionsToDb(){
     const removedSections = JSON.parse(localStorage.getItem('removedSections') || '[]');
     if(newSections.length>0){
         try{
-            const desiredUrl = `/projects/settings/${window.djangoContext.project.name}/api-add-requirement-sections`;
+            const desiredUrl = `/projects/settings/${window.djangoContext.project.id}/requirement-sections/`;
             const response = await fetch(desiredUrl,{
                 method: 'POST',
                 headers: {
@@ -331,9 +378,9 @@ async function addSectionsToDb(){
     }
     if(removedSections.length>0){
         try{
-            const desiredUrl = `/projects/settings/${window.djangoContext.project.name}/api-remove-requirement-sections`;
+            const desiredUrl = `/projects/settings/${window.djangoContext.project.id}/requirement-sections/`;
             const response = await fetch(desiredUrl,{
-                method: 'POST',
+                method: 'DELETE',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-CSRFToken': getCookie('csrftoken')
@@ -394,7 +441,7 @@ async function addRequirementsToDb(){
     const removedRequirements = JSON.parse(localStorage.getItem('removedRequirements') || '[]');
     if(newRequirements.length > 0){
         try{
-            const desiredUrl = `/projects/settings/${window.djangoContext.project.name}/api-add-requirements`;
+            const desiredUrl = `/projects/settings/${window.djangoContext.project.id}/requirements/`;
              const response = await fetch(desiredUrl, {
                 method: 'POST',
                 headers: {
@@ -411,9 +458,9 @@ async function addRequirementsToDb(){
     }
     if(removedRequirements.length > 0){
         try{
-            const desiredUrl = `/projects/settings/${window.djangoContext.project.name}/api-remove-requirements`;
+            const desiredUrl = `/projects/settings/${window.djangoContext.project.id}/requirements/`;
              const response = await fetch(desiredUrl, {
-                method: 'POST',
+                method: 'DELETE',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-CSRFToken': getCookie('csrftoken')
@@ -434,7 +481,7 @@ async function addDomainsToDb(){
     const removedDomains = JSON.parse(localStorage.getItem('removedDomains') || '[]');
     try {
         if (newDomains.length > 0) {
-            const desiredUrl = `/projects/settings/${window.djangoContext.project.name}/api-add-domains`;
+            const desiredUrl = `/projects/settings/${window.djangoContext.project.id}/domains/`;
             const addRes = await fetch(desiredUrl, {
                 method: 'POST',
                 headers: {
@@ -447,9 +494,9 @@ async function addDomainsToDb(){
         }
 
         if (removedDomains.length > 0) {
-            const desiredUrl = `/projects/settings/${window.djangoContext.project.name}/api-remove-domains`;
+            const desiredUrl = `/projects/settings/${window.djangoContext.project.id}/domains/`;
             const remRes = await fetch(desiredUrl, {
-                method: 'POST',
+                method: 'DELETE',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-CSRFToken': getCookie('csrftoken')
@@ -478,7 +525,9 @@ const PROJECT_PERMISSIONS = [
     { key: 'can_invite_others', label: 'Can invite others' },
     { key: 'can_kick_others', label: 'Can kick others' },
     { key: 'can_change_roles', label: 'Can change roles' },
-    { key: 'can_start_calls', label: 'Can start calls' },
+    { key: 'can_create_branches', label: 'Can create branches' },
+    { key: 'can_merge_branches', label: 'Can merge branches' },
+    { key: 'can_delete_branches', label: 'Can delete branches' },
     { key: 'can_add_tasks', label: 'Can add tasks' },
     { key: 'can_delete_tasks', label: 'Can delete tasks' },
     { key: 'can_modify_tasks', label: 'Can modify tasks' },
@@ -583,7 +632,7 @@ async function loadRolesSection() {
 // 3. FETCH ROLURI GET
 async function getProjectRoles() {
     try {
-        const response = await fetch(`/projects/settings/${window.djangoContext.project.name}/api-get-roles`, {
+        const response = await fetch(`/projects/settings/${window.djangoContext.project.id}/roles/`, {
             headers: { 'X-Requested-With': 'XMLHttpRequest' }
         });
 
@@ -613,7 +662,7 @@ async function createNewRole(event) {
     });
 
     try {
-        const response = await fetch(`/projects/settings/${window.djangoContext.project.id}/api-add-role`, {
+        const response = await fetch(`/projects/settings/${window.djangoContext.project.id}/roles/`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
