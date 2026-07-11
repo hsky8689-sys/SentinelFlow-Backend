@@ -9,6 +9,7 @@ from django.core.validators import validate_slug
 from django.db import models, transaction
 from django.db.models import QuerySet
 
+from devnetwork.caching import cache_manager, UserCacheKey
 from users.models import User
 
 
@@ -43,6 +44,7 @@ class ProjectManager(models.Manager):
                 if not UserProjectRole.objects.give_role(proj.owner, proj, default_roles[0][0].id):
                     transaction.set_rollback(True)
                     return None
+            cache_manager.delete(UserCacheKey.PROJECTS.format(user_id=user))
             return proj
         except django.db.DatabaseError as e:
             print(str(e))
@@ -67,7 +69,12 @@ class ProjectManager(models.Manager):
         :param project:
         :return:
         """
-        return self.filter(id__in=UserProjectRole.objects.filter(user_id=user.id).values_list('project_id', flat=True))
+        cache_key = UserCacheKey.PROJECTS.format(user_id=user.id)
+        projects = cache_manager.get(cache_key)
+        if projects is None:
+            projects = list(self.filter(id__in=UserProjectRole.objects.filter(user_id=user.id).values_list('project_id', flat=True)))
+            cache_manager.set(cache_key, projects, timeout=3600)
+        return projects
 
 
 class Project(models.Model):

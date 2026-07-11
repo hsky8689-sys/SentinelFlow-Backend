@@ -8,6 +8,8 @@ from datetime import datetime
 from django.utils import timezone
 from django.db import transaction
 
+from devnetwork.caching import cache_manager, UserCacheKey
+
 class CustomUserManager(BaseUserManager):
     def create_user(self,username,email,password,birthday):
         with transaction.atomic():
@@ -39,8 +41,18 @@ class User(AbstractBaseUser,PermissionsMixin):
         db_table = 'users'
         #managed = False
 
+class UserProfileDataManager(models.Manager):
+    def get_profile_data(self, user):
+        cache_key = UserCacheKey.PROFILE_DATA.format(user_id=user.id)
+        data = cache_manager.get(cache_key)
+        if data is None:
+            data = self.filter(user_id=user.id).first()
+            cache_manager.set(cache_key, data, timeout=3600)
+        return data
+
 class UserProfileData(models.Model):
     user = models.ForeignKey(User,on_delete=models.CASCADE)
+    objects = UserProfileDataManager()
     profile_picture = models.ImageField(
         upload_to='static/profile_pictures/%Y/%m/%d/',
         blank=True,
@@ -72,6 +84,7 @@ class CustomUserProfileSectionManager(models.Manager):
                                hidden=hidden
                                ))
         new_section.save()
+        cache_manager.delete(UserCacheKey.PROFILE_SECTIONS.format(user_id=user.id))
     def delete_user_profile_section(self,user:User,section_id):
         """
         Deletes a former profile section from an user's personal page
@@ -79,6 +92,7 @@ class CustomUserProfileSectionManager(models.Manager):
         :return:true or false if the section was updated accordingly
         """
         self.filter(id=section_id,user_id=user.id).delete()
+        cache_manager.delete(UserCacheKey.PROFILE_SECTIONS.format(user_id=user.id))
         return self.filter(id=section_id).count() == 0
 
     def update_user_profile_section(self,new_section)-> bool | None:
@@ -92,7 +106,10 @@ class CustomUserProfileSectionManager(models.Manager):
                 former_section = UserProfileSection.objects.select_for_update().filter(id=new_section.id)
                 if former_section is None:
                     return False
+                owner_user_id = former_section.values_list('user_id', flat=True).first()
                 former_section.update(name=new_section.name,content=new_section.content,hidden=new_section.hidden)
+                if owner_user_id is not None:
+                    cache_manager.delete(UserCacheKey.PROFILE_SECTIONS.format(user_id=owner_user_id))
                 return True
         except (django.db.DatabaseError,ValueError) as err:
             print(f"Error handling request: {str(err)}")
@@ -106,7 +123,12 @@ class CustomUserProfileSectionManager(models.Manager):
         """
         if user is None:
             return []
-        return self.filter(user_id=user.id) if includehidden else self.filter(user_id=user.id,hidden=False)
+        cache_key = UserCacheKey.PROFILE_SECTIONS.format(user_id=user.id)
+        all_sections = cache_manager.get(cache_key)
+        if all_sections is None:
+            all_sections = list(self.filter(user_id=user.id))
+            cache_manager.set(cache_key, all_sections, timeout=3600)
+        return all_sections if includehidden else [s for s in all_sections if not s.hidden]
     def create_default_user_sections(self, user_id):
         """
         Creates the default user sections after the account gets created
@@ -144,7 +166,12 @@ class UserTechnicalSkillsManager(models.Manager):
                 if already_existing:
                     transaction.set_rollback(True)
                     return None
-                return self.get_or_create(name=name,section_id=section_id) if not already_existing else None
+                result = self.get_or_create(name=name,section_id=section_id) if not already_existing else None
+            if result is not None:
+                owner_user_id = UserTechnicalSkillSection.objects.filter(id=section_id).values_list('user_id', flat=True).first()
+                if owner_user_id is not None:
+                    cache_manager.delete(UserCacheKey.TECHSTACK.format(user_id=owner_user_id))
+            return result
         except (django.db.DatabaseError, ValueError) as err:
             print(f"Error handling request: {str(err)}")
             return None
@@ -157,7 +184,11 @@ class UserTechnicalSkillsManager(models.Manager):
         """
         if not skill:
             raise django.db.DatabaseError("Skill cannot be None")
-        return self.get(id=skill.id).delete()
+        owner_user_id = UserTechnicalSkillSection.objects.filter(id=skill.section_id).values_list('user_id', flat=True).first()
+        result = self.get(id=skill.id).delete()
+        if owner_user_id is not None:
+            cache_manager.delete(UserCacheKey.TECHSTACK.format(user_id=owner_user_id))
+        return result
     def get_skills_from_section(self, section_id):
         """
 
@@ -187,12 +218,17 @@ class UserTechnicalSkillSectionManager(models.Manager):
         :param user:
         :return:A dictionary with elements of type "tech-stack category":"User skills from that one category"
         """
+        cache_key = UserCacheKey.TECHSTACK.format(user_id=user.id)
+        tech_dict = cache_manager.get(cache_key)
+        if tech_dict is not None:
+            return tech_dict
         sections = self.filter(user=user)
         tech_dict = {}
         for section in sections:
             tech_dict[section] = []
             for skill in UserTechnicalSkill.objects.get_skills_from_section(section.id):
                 tech_dict[section].append(skill)
+        cache_manager.set(cache_key, tech_dict, timeout=3600)
         return tech_dict
 
 class UserTechnicalSkillSection(models.Model):
@@ -243,6 +279,7 @@ class RequestManager(models.Manager):
                 status= 'pending',
                 timestamp= timezone.now()
             )
+            cache_manager.delete(UserCacheKey.FRIENDSHIP_REQUESTS.format(user_id=receiver.id))
             return obj
         except Exception as err:
             print(f"Eroare ORM: {str(err)}")
@@ -254,6 +291,7 @@ class RequestManager(models.Manager):
                     status='pending',
                     timestamp=timezone.now()
                 )
+            cache_manager.delete(UserCacheKey.FRIENDSHIP_REQUESTS.format(user_id=receiver.id))
             return obj
         except (django.db.DatabaseError, ValueError) as err:
             print(f"Error handling request: {str(err)}")
@@ -273,7 +311,8 @@ class RequestManager(models.Manager):
                 found.status = 'accepted'
                 Friendship.objects.create(sender=request.sender,receiver=request.receiver)
                 found.save()
-                return found
+            cache_manager.delete(UserCacheKey.FRIENDSHIP_REQUESTS.format(user_id=request.receiver_id))
+            return found
         except (django.db.DatabaseError,ValueError) as err:
             print(f"Error handling request: {str(err)}")
             return None
@@ -291,7 +330,8 @@ class RequestManager(models.Manager):
                     raise ValueError("Request was already handled")
                 found.status = 'declined'
                 found.save()
-                return found
+            cache_manager.delete(UserCacheKey.FRIENDSHIP_REQUESTS.format(user_id=request.receiver_id))
+            return found
         except (django.db.DatabaseError, ValueError) as err:
             print(f"Error handling request: {str(err)}")
             return None
@@ -302,9 +342,20 @@ class RequestManager(models.Manager):
         except django.db.DatabaseError:
             return []
 
+    def get_pending_friend_requests(self,user):
+        cache_key = UserCacheKey.FRIENDSHIP_REQUESTS.format(user_id=user.id)
+        requests = cache_manager.get(cache_key)
+        if requests is None:
+            requests = list(self.filter(receiver=user, request_type='friend', status='pending'))
+            cache_manager.set(cache_key, requests, timeout=3600)
+        return requests
+
     def remove_request(self, request):
         try:
+            receiver_id, request_type = request.receiver_id, request.request_type
             deleted_count, _ = request.delete()
+            if request_type == 'friend':
+                cache_manager.delete(UserCacheKey.FRIENDSHIP_REQUESTS.format(user_id=receiver_id))
             return deleted_count > 0
         except django.db.DatabaseError:
             return False

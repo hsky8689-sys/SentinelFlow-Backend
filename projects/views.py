@@ -18,10 +18,12 @@ from django.views.decorators.http import require_http_methods, require_POST, req
 from django_ratelimit.decorators import ratelimit
 
 from devnetwork import settings
+from devnetwork.caching import cache_manager, UserCacheKey
 from projects.github_utils import get_project_owner_repo_from_link, get_project_owner_repo, get_project_repo_token, \
     get_repo_token, fetch_github_tree_with_sizes, get_project_tree_paths, invalidate_repo_cache, get_default_branch, \
     get_all_github_repo_branches, add_new_branch_to_repo, modify_branch_from_repo, delete_branch_from_repo, \
-    verify_github_signature, commit_was_pushed_from_app, _add_project_repository, _delete_project_repository
+    verify_github_signature, commit_was_pushed_from_app, _add_project_repository, _delete_project_repository, \
+    _get_project_push_policy, _set_project_push_policy, _clear_flagged_external_push
 from projects.project_helpers import get_user_file_permissions, _get_project_domains, _add_project_domains, \
     _delete_project_domains, _get_project_requirements, _add_project_requirements, _remove_project_requirements, \
     _remove_project_sections, _add_project_sections, _get_project_tasks, _add_project_task, _remove_project_tasks, \
@@ -29,7 +31,6 @@ from projects.project_helpers import get_user_file_permissions, _get_project_dom
 from projects.models import Project, UserProjectRole, ProjectDomain, \
     ProjectTask, ProjectRole, ResourceAccess, TaskResourceAccess, ProjectTaskParticipation, ProjectRepoStats
 from users.models import User, UserRequest
-
 
 @login_required
 @csrf_protect
@@ -139,6 +140,20 @@ def api_handle_project_repositories(request,id):
             return _delete_project_repository(request,id)
         case _:
             return JsonResponse({'status':'bad request'},status=400)
+@login_required
+@csrf_protect
+@require_http_methods(["GET","POST","DELETE"])
+@ratelimit(key='user',rate='120/m',method='GET',block=True)
+@ratelimit(key='user',rate='20/m',method='POST',block=True)
+@ratelimit(key='user',rate='20/m',method='DELETE',block=True)
+def api_project_push_policy(request,id):
+    match request.method:
+        case "GET":
+            return _get_project_push_policy(request,id)
+        case "POST":
+            return _set_project_push_policy(request,id)
+        case "DELETE":
+            return _clear_flagged_external_push(request,id)
 @login_required
 @csrf_protect
 @require_http_methods(["GET","POST","DELETE"])
@@ -722,6 +737,7 @@ def api_handle_project_join_request(request):
                 project=project,
                 role=ProjectRole.objects.get(name='newbie')
             )
+            cache_manager.delete(UserCacheKey.PROJECTS.format(user_id=user_req.sender_id))
             user_req.status = 'accepted'
             user_req.save()
             return JsonResponse({'status': 'success', 'message': 'User added to project!'},status=200)
@@ -735,6 +751,7 @@ def api_handle_project_join_request(request):
                 )
                 user_req.status = 'accepted'
                 user_req.save()
+            cache_manager.delete(UserCacheKey.PROJECTS.format(user_id=user_req.sender_id))
             return JsonResponse({'status': 'success', 'message': 'User successfully added to the project!'}, status=200)
 
         elif action in ['reject', 'deny', 'declined']:
@@ -893,7 +910,7 @@ def api_request_file_share(request):
         project = get_object_or_404(Project,name=project_name)
 
         project_files = get_project_tree_paths(project,'main')
-        # de facut branch-uri si cacheuit cumva asta.....
+        # de facut branch-uri si cacheuit cumva asta....
         if not file_url in project_files:
             return JsonResponse({
                 'status': 'Bad request',
@@ -1068,6 +1085,8 @@ def api_merge_github_branches(request,id):
         return JsonResponse({'status': 'error', 'message': 'Internal server error'},status=500)
 @csrf_exempt
 @require_POST
+@ratelimit(key='user',rate='20/m',block=True)
+@ratelimit(key='ip',rate='50/m',block=True)
 def webhook_github(request,id):
     try:
         signature_header = request.headers.get('X-Hub-Signature-256')
@@ -1078,7 +1097,12 @@ def webhook_github(request,id):
             return JsonResponse({'status': 'bad request', 'message': 'missing repository info'}, status=400)
 
         all_repos = ProjectRepoStats.objects.get_project_repos(project)
-        if not repo_full_name in all_repos:
+        tracked_full_names = []
+        for stat in all_repos:
+            stat_owner, stat_repo = get_project_owner_repo_from_link(stat.github_repo_link)
+            if stat_owner and stat_repo:
+                tracked_full_names.append(f'{stat_owner}/{stat_repo}')
+        if repo_full_name not in tracked_full_names:
             return JsonResponse({'status': 'bad request', 'message': 'given repository is not associated with the project'}, status=400)
 
         repo_stat = ProjectRepoStats.objects.filter(github_repo_link__icontains=repo_full_name).first()

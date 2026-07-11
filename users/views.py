@@ -104,7 +104,7 @@ def acces_profile(request,username):
                     sent_to_him = True
                 else:
                     received_from_him = True
-        data = UserProfileData.objects.get(user_id=user.id)
+        data = UserProfileData.objects.get_profile_data(user)
         profile_picture = data.profile_picture
         background_picture = data.background_picture
     except Exception as e:

@@ -4,12 +4,12 @@ import json
 from datetime import datetime
 
 import requests
-from django.core.cache import cache
 from django.db import transaction
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 
 from devnetwork import settings
+from devnetwork.caching import cache_manager
 from projects.models import Project, UserProjectRole, ProjectRepoStats
 
 
@@ -172,11 +172,19 @@ def _add_project_repository(request,id):
         repo_stat = ProjectRepoStats.objects.create(github_repo_name=github_repo_name,github_repo_link=github_repo_link,github_token=github_token)
         project.repo_stats.add(repo_stat)
         owner, repo = get_project_owner_repo_from_link(github_repo_link)
+        webhook_registered = False
+        branch_protection_applied = False
         if owner and repo:
-            register_github_webhook(owner, repo, project, github_token)
+            webhook_registered = register_github_webhook(owner, repo, project, github_token)
+            if not webhook_registered:
+                print(f"Could not register github webhook for {owner}/{repo}")
             if project.can_only_modify_from_app:
-                apply_branch_protection(owner, repo, github_token, repo_stat)
-        return JsonResponse({'status':'success','repo_id':repo_stat.id},status=200)
+                branch_protection_applied = apply_branch_protection(owner, repo, github_token, repo_stat)
+                if not branch_protection_applied:
+                    print(f"Could not apply branch protection for {owner}/{repo}")
+        return JsonResponse({'status':'success','repo_id':repo_stat.id,
+                             'webhook_registered':webhook_registered,
+                             'branch_protection_applied':branch_protection_applied},status=200)
     except Exception as e:
         print(str(e))
         return JsonResponse({'status': 'error', 'message': 'Internal server error'},status=500)
@@ -200,6 +208,60 @@ def _delete_project_repository(request,id):
     except Exception as e:
         print(str(e))
         return JsonResponse({'status': 'error', 'message': 'Internal server error'},status=500)
+def _get_project_push_policy(request,id):
+    try:
+        project = get_object_or_404(Project,id=id)
+        return JsonResponse({
+            'status': 'success',
+            'can_only_modify_from_app': project.can_only_modify_from_app,
+            'flagged_external_push': project.flagged_external_push,
+        }, status=200)
+    except Exception as e:
+        print(str(e))
+        return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
+def _set_project_push_policy(request,id):
+    try:
+        project = get_object_or_404(Project,id=id)
+        role = UserProjectRole.objects.get_user_role_in_project(project,request.user)
+        if not UserProjectRole.objects.get_role_permissions(role,project)['can_change_project_settings']:
+            return JsonResponse({'status':'Unauthorized access'},status=403)
+        data = json.loads(request.body)
+        enabled = data.get('can_only_modify_from_app')
+        if enabled is None:
+            return JsonResponse({'status':'bad request','message':'can_only_modify_from_app is required'},status=400)
+        enabled = bool(enabled)
+        repo_results = []
+        for repo_stat in project.repo_stats.all():
+            owner, repo = get_project_owner_repo_from_link(repo_stat.github_repo_link)
+            if not owner or not repo:
+                continue
+            if enabled:
+                success = apply_branch_protection(owner, repo, repo_stat.github_token, repo_stat)
+            else:
+                success = revert_branch_protection(repo_stat)
+            repo_results.append({'repo_id': repo_stat.id, 'success': success})
+        project.can_only_modify_from_app = enabled
+        project.save(update_fields=['can_only_modify_from_app'])
+        return JsonResponse({
+            'status': 'success',
+            'can_only_modify_from_app': enabled,
+            'repos': repo_results,
+        }, status=200)
+    except Exception as e:
+        print(str(e))
+        return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
+def _clear_flagged_external_push(request,id):
+    try:
+        project = get_object_or_404(Project,id=id)
+        role = UserProjectRole.objects.get_user_role_in_project(project,request.user)
+        if not UserProjectRole.objects.get_role_permissions(role,project)['can_change_project_settings']:
+            return JsonResponse({'status':'Unauthorized access'},status=403)
+        project.flagged_external_push = False
+        project.save(update_fields=['flagged_external_push'])
+        return JsonResponse({'status': 'success', 'flagged_external_push': False}, status=200)
+    except Exception as e:
+        print(str(e))
+        return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
 def get_project_owner_repo(project):
     repo_stat = project.repo_stats.first()
     if repo_stat is None:

@@ -7,7 +7,7 @@ from projects.views import open_project_page, open_project_members_page, open_pr
     api_get_availible_languages, api_request_project_join, api_handle_project_join_request, request_file_open, \
     api_handle_file_access_request, api_request_file_share, api_handle_request_file_share, \
     api_github_get_all_repo_branches, api_github_handle_branch_action, api_merge_github_branches, webhook_github, \
-    api_handle_project_repositories
+    api_handle_project_repositories, api_project_push_policy
 
 app_name = 'projects'
 
@@ -20,6 +20,7 @@ urlpatterns = [
     path("settings/<int:id>/requirement-sections/", api_project_requirement_sections, name="project-requirement-sections"),
     path("settings/<int:id>/tasks/", api_project_tasks, name="project-tasks"),
     path("settings/<int:id>/roles/", api_project_roles, name="project-roles"),
+    path("settings/<int:id>/push-policy/", api_project_push_policy, name="project-push-policy"),
     path('api/github/branches',api_github_get_all_repo_branches,name='get-all-repo-branches'),
     path('api/github/<int:id>/branches',api_github_handle_branch_action,name='add-branch-on-github-repo'),
     path('api/github/<str:owner>/<str:repo>/',github_proxy_view,name='github-fetch-structure'),

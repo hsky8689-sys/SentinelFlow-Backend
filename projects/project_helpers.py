@@ -1,21 +1,21 @@
 import json
-
 import django.db
 from django.db import transaction
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
-
 from projects.github_utils import get_project_tree_paths
 from projects.models import Project, UserProjectRole, ProjectDomain, ProjectSkillRequirement, \
     ProjectRequirementSection, ProjectTask, ProjectRole, TaskResourceAccess, ProjectTaskParticipation
 from users.models import User
-
 
 def get_user_file_permissions(user,project):
     try:
         if project is None:
             return {}
         all_project_files = get_project_tree_paths(project,'master')
+        role = UserProjectRole.objects.get_user_role_in_project(project, user)
+        if role == 'owner':
+            return {file: 'ACCESS' for file in all_project_files}
         srv = TaskResourceAccess.objects
         accessible_paths = srv.get_user_accessible_paths(user, project)
         res = {}
