@@ -9,7 +9,7 @@ from django.core.validators import validate_slug
 from django.db import models, transaction
 from django.db.models import QuerySet
 
-from devnetwork.caching import cache_manager, UserCacheKey
+from devnetwork.caching import cache_manager, UserCacheKey, ProjectCacheKey
 from users.models import User
 
 
@@ -308,53 +308,63 @@ class UserProjectRoleManager(models.Manager):
             with transaction.atomic():
                 role = self.model(user_id=user.id, project_id=project.id, role_id=role)
                 role.save()
-                return True
+            cache_manager.delete(ProjectCacheKey.USER_ROLE.format(project_id=project.id, user_id=user.id))
+            return True
         except django.db.Error as e:
             print(str(e))
             return False
     def get_user_role_in_project(self, project, user):
         """
         Gets an user's role in a project if it exists,else labels them as visitors
-        :param project:
+        :param project: a Project instance OR a raw project id (some callers, e.g. push_files, pass the raw id)
         :param user:
         :return:
         """
+        project_id = project.id if hasattr(project, 'id') else project
+        cache_key = ProjectCacheKey.USER_ROLE.format(project_id=project_id, user_id=user.id)
+        cached_role = cache_manager.get(cache_key)
+        if cached_role is not None:
+            return cached_role
         try:
             role_obj = self.get_queryset().filter(
                 project=project,
                 user=user
             ).select_related('role').first()
-            return role_obj.role.name if role_obj else 'visitor'
+            role_name = role_obj.role.name if role_obj else 'visitor'
         except UserProjectRole.DoesNotExist:
-            return 'visitor'
+            role_name = 'visitor'
+        cache_manager.set(cache_key, role_name, timeout=3600)
+        return role_name
 
     def get_role_permissions(self, role_name, project):
+        permission_keys = [
+            'can_accept_invites', 'can_invite_others', 'can_kick_others',
+            'can_change_roles', 'can_create_branches', 'can_merge_branches',
+            'can_delete_branches', 'can_add_tasks',
+            'can_delete_tasks', 'can_modify_tasks', 'can_modify_files',
+            'can_execute_code', 'can_share_file_access', 'can_change_project_settings'
+        ]
+        project_id = project.id if hasattr(project, 'id') else project
+        cache_key = ProjectCacheKey.ROLE_PERMISSIONS.format(project_id=project_id, role_name=role_name)
+        cached_permissions = cache_manager.get(cache_key)
+        if cached_permissions is not None:
+            return cached_permissions
         try:
             user_project_role = self.get_queryset().filter(
                 project=project,
                 role__name=role_name,
             ).select_related('role').first()
 
-            permission_keys = [
-                'can_accept_invites', 'can_invite_others', 'can_kick_others',
-                'can_change_roles', 'can_create_branches', 'can_merge_branches',
-                'can_delete_branches', 'can_add_tasks',
-                'can_delete_tasks', 'can_modify_tasks', 'can_modify_files',
-                'can_execute_code', 'can_share_file_access', 'can_change_project_settings'
-            ]
             if not user_project_role:
-                return {k: False for k in permission_keys}
-            role = user_project_role.role
-            return {k: getattr(role, k) for k in permission_keys}
+                permissions = {k: False for k in permission_keys}
+            else:
+                role = user_project_role.role
+                permissions = {k: getattr(role, k) for k in permission_keys}
         except Exception as e:
             print(str(e))
-            return {k: False for k in [
-                'can_accept_invites', 'can_invite_others', 'can_kick_others',
-                'can_change_roles', 'can_create_branches', 'can_merge_branches',
-                'can_delete_branches', 'can_add_tasks',
-                'can_delete_tasks', 'can_modify_tasks', 'can_modify_files',
-                'can_execute_code', 'can_share_file_access', 'can_change_project_settings'
-            ]}
+            permissions = {k: False for k in permission_keys}
+        cache_manager.set(cache_key, permissions, timeout=3600)
+        return permissions
 
     def give_role_to_user(self, project: int, user: int, role):
         """
@@ -369,9 +379,12 @@ class UserProjectRoleManager(models.Manager):
             with transaction.atomic():
                 old_role = self.filter(project_id=project, user_id=user)
                 if not old_role.exists():
-                    return self.create(project_id=project, user_id=user, role=role) is not None
-                old_role.update(role=role)
-                return True
+                    result = self.create(project_id=project, user_id=user, role=role) is not None
+                else:
+                    old_role.update(role=role)
+                    result = True
+            cache_manager.delete(ProjectCacheKey.USER_ROLE.format(project_id=project, user_id=user))
+            return result
         except (django.db.DatabaseError,ValueError) as e:
             print(str(e))
             return False

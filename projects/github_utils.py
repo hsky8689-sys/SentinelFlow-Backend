@@ -9,7 +9,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 
 from devnetwork import settings
-from devnetwork.caching import cache_manager
+from devnetwork.caching import cache_manager, ProjectCacheKey
 from projects.models import Project, UserProjectRole, ProjectRepoStats
 
 
@@ -156,6 +156,28 @@ def get_project_owner_repo_from_link(github_repo_link):
     if len(link_parts) < 5:
         return None, None
     return link_parts[3], link_parts[4]
+def get_project_repo_summaries(project):
+    """
+    Returns the project's linked repos as [{id, name, owner, repo, link}, ...],
+    cached as one structure per project (not split into parallel owner/url lists).
+    Distinct from ProjectRepoStats.objects.get_project_repos, which returns the
+    raw (uncached) queryset of ProjectRepoStats model instances.
+    """
+    cache_key = ProjectCacheKey.REPOS.format(project_id=project.id)
+    repos = cache_manager.get(cache_key)
+    if repos is None:
+        repos = []
+        for stat in project.repo_stats.all():
+            stat_owner, stat_repo = get_project_owner_repo_from_link(stat.github_repo_link)
+            repos.append({
+                'id': stat.id,
+                'name': stat.github_repo_name,
+                'owner': stat_owner,
+                'repo': stat_repo,
+                'link': stat.github_repo_link,
+            })
+        cache_manager.set(cache_key, repos, timeout=3600)
+    return repos
 def _add_project_repository(request,id):
     try:
         project = get_object_or_404(Project,id=id)
@@ -171,6 +193,7 @@ def _add_project_repository(request,id):
                                       'message':'github_repo_name and github_repo_link are required'},status=400)
         repo_stat = ProjectRepoStats.objects.create(github_repo_name=github_repo_name,github_repo_link=github_repo_link,github_token=github_token)
         project.repo_stats.add(repo_stat)
+        cache_manager.delete(ProjectCacheKey.REPOS.format(project_id=project.id))
         owner, repo = get_project_owner_repo_from_link(github_repo_link)
         webhook_registered = False
         branch_protection_applied = False
@@ -204,6 +227,7 @@ def _delete_project_repository(request,id):
         if repo_stat.protected_branch:
             revert_branch_protection(repo_stat)
         project.repo_stats.remove(repo_stat)
+        cache_manager.delete(ProjectCacheKey.REPOS.format(project_id=project.id))
         return JsonResponse({'status':'success','message':'Repository removed from project'},status=200)
     except Exception as e:
         print(str(e))
@@ -327,7 +351,7 @@ def get_project_tree_paths(project, branch='main'):
     owner, repo = root_link_parts[3], root_link_parts[4]
 
     cache_key = f"github_tree_recursive_{owner}_{repo}_{branch}"
-    tree = cache.get(cache_key)
+    tree = cache_manager.get(cache_key)
     if tree:
         return {item['path'] for item in tree}
 
@@ -353,25 +377,22 @@ def get_project_tree_paths(project, branch='main'):
         'path': item['path'],
         'type': 'dir' if item['type'] == 'tree' else 'file'
     } for item in raw_tree]
-    cache.set(cache_key, formatted_tree, timeout=3600)
+    cache_manager.set(cache_key, formatted_tree, timeout=3600)
     return {item['path'] for item in formatted_tree}
 
-def invalidate_repo_cache(repo:str,owner:str):
+def invalidate_repo_cache(repo:str,owner:str,branch:str):
     """
-    Invalidates every cached entry for a project's repo: the recursive tree
-    listings (for both 'main' and 'master') and every per-file/sub-folder
-    content cache, so a push is immediately reflected instead of serving
-    stale cached structure/content on the next request.
+    Invalidates every cached entry for the exact branch that was just pushed to:
+    its recursive tree listing and every per-file/sub-folder content cache for
+    that branch, so a push is immediately reflected instead of serving stale
+    cached structure/content on the next request. Scoped to `branch` specifically
+    (not hardcoded to 'main'/'master') since a push can target any branch name.
     """
     try:
-        for branch in ('main', 'master'):
-            cache.delete(f"github_tree_recursive_{owner}_{repo}_{branch}")
-            cache.delete(f"github_tree_with_size_{owner}_{repo}_{branch}")
-
-        stale_keys = list(cache.keys(f"github_file_{owner}_{repo}_*"))
-        stale_keys += list(cache.keys(f"file_content_{owner}_{repo}_*"))
-        if stale_keys:
-            cache.delete_many(stale_keys)
+        cache_manager.delete(f"github_tree_recursive_{owner}_{repo}_{branch}")
+        cache_manager.delete(f"github_tree_with_size_{owner}_{repo}_{branch}")
+        cache_manager.delete_pattern(f"github_file_{owner}_{repo}_{branch}_*")
+        cache_manager.delete_pattern(f"file_content_{owner}_{repo}_{branch}_*")
     except Exception as e:
         print(str(e))
 def is_repo_private(owner,repo):

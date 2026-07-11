@@ -159,22 +159,50 @@ def chat_message_api(request):
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=500)
 
-@login_required
-@require_http_methods(['POST'])
-@ratelimit(key='user_or_ip',rate='5/s',method='POST')
-def api_create_group_conversation(request):
+def _get_project_conversations(request,project_id):
     try:
-        data = json.loads(request.body)
-        project_id = data.get('project_id')
-        member_ids = data.get('member_ids', [])
-        if not project_id:
-            return JsonResponse({'error': 'project_id is required'}, status=400)
-
         project = get_object_or_404(Project, id=project_id)
-        requester_role = UserProjectRole.objects.get_user_role_in_project(project, request.user)
-        if requester_role == 'visitor':
+        role = UserProjectRole.objects.get_user_role_in_project(project, request.user)
+        if role == 'visitor':
             return JsonResponse({'error': 'You are not a member of this project'}, status=403)
 
+        page_nr = request.GET.get('pageNumber',None)
+        page_size = request.GET.get('pageSize',None)
+        if page_nr is None:
+            return JsonResponse({'error':'Page number unspecified'},status=400)
+        if page_size is None:
+            return JsonResponse({'error':'Page size unspecified'},status=400)
+        page_nr = int(page_nr)
+        page_size = int(page_size)
+
+        conversations = ConversationService.load_project_conversations(project_id, page_nr, page_size)
+        serialized_conversations = [
+            {
+                "id": conv.id,
+                "last_message": conv.last_message_timestamp,
+                "is_group": conv.is_group
+            }
+            for conv in conversations
+        ]
+        return JsonResponse({
+            'success': True,
+            'message': f'Page with index {page_nr} was retrieved',
+            'content': serialized_conversations
+        }, status=200)
+    except ValueError:
+        return JsonResponse({'error': 'Parameters must be integers'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+def _add_project_conversation(request,project_id):
+    try:
+        project = get_object_or_404(Project, id=project_id)
+        role = UserProjectRole.objects.get_user_role_in_project(project, request.user)
+        if role == 'visitor':
+            return JsonResponse({'error': 'You are not a member of this project'}, status=403)
+
+        data = json.loads(request.body)
+        member_ids = data.get('member_ids', [])
         valid_member_ids = set(
             UserProjectRole.objects.filter(project=project, user_id__in=member_ids).values_list('user_id', flat=True)
         )
@@ -192,3 +220,38 @@ def api_create_group_conversation(request):
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
+
+def _delete_project_conversation(request,project_id):
+    try:
+        project = get_object_or_404(Project, id=project_id)
+        role = UserProjectRole.objects.get_user_role_in_project(project, request.user)
+        if role == 'visitor':
+            return JsonResponse({'error': 'You are not a member of this project'}, status=403)
+
+        data = json.loads(request.body)
+        conversation_id = data.get('conversation_id')
+        if not conversation_id:
+            return JsonResponse({'error': 'conversation_id is required'}, status=400)
+
+        deleted = ConversationService.delete_project_conversation(project_id, conversation_id)
+        if not deleted:
+            return JsonResponse({'error': 'Conversation not found for this project'}, status=404)
+        return JsonResponse({'success': True, 'message': 'Conversation deleted'}, status=200)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@login_required
+@require_http_methods(["GET","POST","DELETE"])
+@ratelimit(key='user_or_ip',rate='80/m',method='GET')
+@ratelimit(key='user_or_ip',rate='30/m',method='POST')
+@ratelimit(key='user_or_ip',rate='30/m',method='DELETE')
+def api_project_conversations(request,project_id):
+    match request.method:
+        case "GET":
+            return _get_project_conversations(request,project_id)
+        case "POST":
+            return _add_project_conversation(request,project_id)
+        case "DELETE":
+            return _delete_project_conversation(request,project_id)
