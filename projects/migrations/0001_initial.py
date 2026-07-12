@@ -23,7 +23,6 @@ class Migration(migrations.Migration):
             ],
             options={
                 'db_table': 'projects',
-                'managed': False,
             },
         ),
         migrations.CreateModel(
@@ -33,7 +32,6 @@ class Migration(migrations.Migration):
             ],
             options={
                 'db_table': 'project_task_participations',
-                'managed': False,
             },
         ),
         migrations.CreateModel(

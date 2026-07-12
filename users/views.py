@@ -1,10 +1,9 @@
 import json
 
-from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
-from django.shortcuts import render, redirect, get_object_or_404
+from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
@@ -22,7 +21,7 @@ from .search import SearchManager, SearchFilterData
 @csrf_protect
 @ratelimit(key='user', rate='60/m',method='GET',block=True)
 def search_page(request):
-    return render(request, 'html/search.html', {'user_id': request.user.id})
+    return JsonResponse({'status': 'success', 'user_id': request.user.id})
 @login_required
 @csrf_protect
 @ratelimit(key='user', rate='30/m',method='POST',block=True)
@@ -51,22 +50,25 @@ def signup_page(request):
         email = request.POST['email']
         password = request.POST['password']
         birthday = request.POST['birthday']
-        try:
-            user = User.objects.create_user(
-                username=username,
-                email=email,
-                password=password,
-                birthday=birthday
-            )
-            login(request,user)
-            messages.success(request,f'Bun venit, {user.username}!')
-            return redirect('user_profile',username=username)
-        except Exception as e:
-            messages.error(request,f'Error :{str(e)}')
-        messages.success(request, 'Cont creat!')
-        return redirect('user_login')
+        user = User.objects.create_user(
+            username=username,
+            email=email,
+            password=password,
+            birthday=birthday
+        )
+        if user is None:
+            return JsonResponse({
+                'status': 'error',
+                'message': 'Could not create account (username/email may already be taken, or a field is invalid)'
+            }, status=400)
+        login(request, user)
+        return JsonResponse({
+            'status': 'success',
+            'message': f'Welcome, {user.username}!',
+            'user': {'id': user.id, 'username': user.username, 'email': user.email},
+        }, status=201)
 
-    return render(request, 'html/signup.html')
+    return JsonResponse({'status': 'ready'})
 @login_required
 @csrf_protect
 @require_GET
@@ -105,8 +107,8 @@ def acces_profile(request,username):
                 else:
                     received_from_him = True
         data = UserProfileData.objects.get_profile_data(user)
-        profile_picture = data.profile_picture
-        background_picture = data.background_picture
+        profile_picture = data.profile_picture.url if data.profile_picture else ''
+        background_picture = data.background_picture.url if data.background_picture else ''
     except Exception as e:
             pass
     context = {
@@ -115,17 +117,25 @@ def acces_profile(request,username):
         "background_picture":background_picture,
         "email":user.email,
         "id":user.id,
-        "user":user,
-        "profile_sections":profile_stats["profile_sections"],
-        "techstack_category":profile_stats["techstack_category"],
-        "user_projects":profile_stats["profile_projects"],
+        "profile_sections":[
+            {"id": s.id, "name": s.name, "content": s.content, "hidden": s.hidden}
+            for s in profile_stats["profile_sections"]
+        ],
+        "techstack_category":{
+            section.name: [skill.name for skill in skills]
+            for section, skills in profile_stats["techstack_category"].items()
+        },
+        "user_projects":[
+            {"id": p.id, "name": p.name, "description": p.description}
+            for p in profile_stats["profile_projects"]
+        ],
         "is_owner":request.user.username == username,
         "sent_to_him": sent_to_him,
         "received_from_him": received_from_him,
         "friends": are_friends,
         "friendship_request_id": friendship_request.id if friendship_request else None,
     }
-    return render(request, "html/profile.html", context)
+    return JsonResponse({'status': 'success', **context})
 @login_required
 def inbox_page(request):
     pass
@@ -142,14 +152,16 @@ def login_page(request):
         user = authenticate(request,username=username,password=password)
         if user:
             login(request, user)
-            return redirect('users:profile-path', username=username)
+            return JsonResponse({
+                'status': 'success',
+                'user': {'id': user.id, 'username': user.username, 'email': user.email},
+            })
         else:
-            messages.error(request,'Date incorecte')
-            return redirect('user_login')
+            return JsonResponse({'status': 'error', 'message': 'Date incorecte'}, status=401)
     else:
         if request.user.is_authenticated:
             logout(request)
-        return render(request, "html/login.html")
+        return JsonResponse({'status': 'ready'})
 @login_required
 @csrf_protect
 @require_http_methods(["GET","POST"])
@@ -157,16 +169,21 @@ def login_page(request):
 @ratelimit(key='user', rate='20/m', method='POST',block=True)
 def create_project(request):
     if request.method == 'GET':
-        return render(request,'html/create_project.html',{"user_id":request.user.id})
+        return JsonResponse({'status': 'ready', 'user_id': request.user.id})
     elif request.method == 'POST':
         name = request.POST['name']
         description = request.POST['description']
         user_id = request.user.id
         project = Project.objects.create_project(user_id,name, description)
         if project is None:
-            messages.error(request, 'Numele de proiect este deja folosit sau invalid (doar litere, cifre, "-" și "_").')
-            return render(request,'html/create_project.html',{"user_id":request.user.id})
-        return acces_profile(request,request.user.username)
+            return JsonResponse({
+                'status': 'error',
+                'message': 'Numele de proiect este deja folosit sau invalid (doar litere, cifre, "-" și "_").'
+            }, status=400)
+        return JsonResponse({
+            'status': 'success',
+            'project': {'id': project.id, 'name': project.name, 'description': project.description},
+        }, status=201)
 @login_required
 @csrf_protect
 @require_POST
@@ -177,13 +194,11 @@ def api_add_skill(request):
     section_id = request.POST.get('section_id')
     if not name or not section_id:
         return JsonResponse({'status': 'error', 'message': 'Date lipsă'}, status=400)
-    if name != request.user.username:
-        return JsonResponse({'status':'error','message':'Cannot add skills for other users'},status=403)
-    success = UserTechnicalSkill.objects.add_user_skill(name=name, section_id=section_id)
+    success = UserTechnicalSkill.objects.add_user_skill(name=name, section_id=section_id, user=request.user)
     if success:
         return JsonResponse({'status': 'success','message':'Skill was succsesfully added'},status=200)
     else:
-        return JsonResponse({'status': 'error','message':'Skill was already added before'},status=500)
+        return JsonResponse({'status': 'error','message':'Skill was already added before, or this section does not belong to you'},status=500)
 @login_required
 @csrf_protect
 @require_http_methods(["DELETE"])
@@ -278,10 +293,18 @@ def api_remove_friend(request,removed):
 def connections_page(request):
     try:
         requests = UserRequest.objects.get_user_requests(request.user)
-        return render(request, 'html/connections.html', {'context': {'user': request.user,
-                'requests': requests}
-                })
+        serialized_requests = [
+            {
+                'id': r.id,
+                'sender_id': r.sender_id,
+                'receiver_id': r.receiver_id,
+                'request_type': r.request_type,
+                'status': r.status,
+                'target': r.target,
+                'timestamp': r.timestamp,
+            }
+            for r in requests
+        ]
+        return JsonResponse({'status': 'success', 'user_id': request.user.id, 'requests': serialized_requests})
     except Exception:
-        return render(request, 'html/connections.html', {'context': {'user': request.user,
-                                                                     'requests': []}
-                                                         })
+        return JsonResponse({'status': 'success', 'user_id': request.user.id, 'requests': []})

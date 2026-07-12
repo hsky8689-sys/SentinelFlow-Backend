@@ -3,7 +3,7 @@ import json
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.contrib.auth.decorators import login_required
-from django.shortcuts import render, get_object_or_404
+from django.shortcuts import get_object_or_404
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods, require_GET
 from django_ratelimit.decorators import ratelimit
@@ -86,39 +86,44 @@ def load_chat_by_id(request,conversation_id):
 def open_chat_room(request):
     try:
         conv_id = request.GET.get("conv_id")
-        user_101 = int(request.GET.get("user_1o1"))
+        user_101_raw = request.GET.get("user_1o1")
+        # previously `int(request.GET.get("user_1o1"))` unconditionally - a
+        # bare visit with no query params at all raised TypeError on None
+        # before ever reaching the "no panel open" branch below.
+        user_101 = int(user_101_raw) if user_101_raw and user_101_raw != "null" else -1
 
         if conv_id and conv_id != "null":
-            return render(request, "html/chat_room.html", {
-                "user": request.user,
+            return JsonResponse({
+                'status': 'success',
+                "user_id": request.user.id,
                 "chat_id": conv_id,
                 "user_101": -1
             })
 
-        elif user_101 and user_101 != "null":
+        elif user_101 != -1:
             existing_conv = ConversationService.check_if_1o1_conversation_exist(request.user.id, user_101)
 
             final_chat_id = existing_conv.id if existing_conv else -1
 
-            return render(request, "html/chat_room.html", {
-                'success': True,
-                "user": request.user,
+            return JsonResponse({
+                'status': 'success',
+                "user_id": request.user.id,
                 "chat_id": final_chat_id,
                 "user_101": user_101
             })
 
         # CAZUL 3: A intrat direct pe /chat/ din bara de navigație
         else:
-            # Aici poți să returnezi interfața de chat fără niciun panou dreapta deschis
-            return render(request, "html/chat_room.html", {
-                "user": request.user,
+            return JsonResponse({
+                'status': 'success',
+                "user_id": request.user.id,
                 "chat_id": -1,
                 "user_101": -1
             })
 
     except Exception as e:
         print(str(e))
-        return JsonResponse({'error': f'Error loading chat: {str(e)}'}, status=500)
+        return JsonResponse({'status': 'error', 'message': f'Error loading chat: {str(e)}'}, status=500)
 
 @login_required
 @require_http_methods(['POST'])

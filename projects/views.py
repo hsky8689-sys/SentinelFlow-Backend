@@ -12,7 +12,6 @@ from django.db import transaction
 from django.db.models import Max
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
-from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 from django.views.decorators.http import require_http_methods, require_POST, require_GET
 from django_ratelimit.decorators import ratelimit
@@ -59,6 +58,10 @@ def open_project_page(request,name):
             owner_username,repo_name = active_repo['owner'],active_repo['repo']
             branches = get_all_github_repo_branches(owner_username,repo_name)
     file_permissions = get_user_file_permissions(request.user,project)
+    staff_serialized = {
+        role_name: [{'id': u.id, 'username': u.username} for u in users]
+        for role_name, users in staff.items()
+    }
     context_data = {
         'role': user_role,
         'user_id': request.user.id,
@@ -69,7 +72,7 @@ def open_project_page(request,name):
         'repo_name':repo_name,
         'repos':repos_for_frontend,
         'active_repo_id':active_repo_id,
-        'staff': staff,
+        'staff': staff_serialized,
         'branches':branches,
         'roles': list(staff.keys()),
         'domains':list(project_domains),
@@ -77,16 +80,20 @@ def open_project_page(request,name):
         'visitor_permissions':visitor_permissions,
         'files_permissions': file_permissions
     }
-    return render(request, 'html/project_page.html', {'stats': context_data})
+    return JsonResponse({'status': 'success', 'stats': context_data})
 @login_required
 @csrf_protect
 @require_GET
 @ratelimit(key='user',rate='120/m',block=True)
 def open_project_members_page(request,name):
-    project = Project.objects.filter(name=name).first()
+    project = get_object_or_404(Project, name=name)
     result = UserProjectRole.objects.get_all_users_in_project(project)
-    stats = {'members': result, 'project_name': project.name}
-    return render(request, 'html/project_members_page.html', {'stats': stats})
+    members_serialized = {
+        role_name: [{'id': u.id, 'username': u.username} for u in users]
+        for role_name, users in result.items()
+    }
+    stats = {'members': members_serialized, 'project_name': project.name}
+    return JsonResponse({'status': 'success', 'stats': stats})
 
 @login_required
 @csrf_protect
@@ -98,7 +105,7 @@ def open_project_settings(request, name):
     permissions = UserProjectRole.objects.get_role_permissions(user_role, project)
 
     if not permissions['can_change_project_settings']:
-        return JsonResponse({'error': 'Unauthorized access', 'code': 403})
+        return JsonResponse({'status': 'error', 'message': 'Unauthorized access'}, status=403)
 
     context_data = {
         'project_name': project.name,
@@ -106,7 +113,7 @@ def open_project_settings(request, name):
         'role': user_role,
         'user_username': request.user.username,
     }
-    return render(request, 'html/project_settings_page.html', {'stats': context_data})
+    return JsonResponse({'status': 'success', 'stats': context_data})
 @login_required
 @csrf_protect
 @require_http_methods(["GET","POST","DELETE"])

@@ -156,13 +156,18 @@ class UserProfileSection(models.Model):
         db_table = 'profile_sections'
 
 class UserTechnicalSkillsManager(models.Manager):
-    def add_user_skill(self,name,section_id):
+    def add_user_skill(self,name,section_id,user):
         """
-
+        Adds `name` to `section_id`, but only if that section belongs to `user`
+        - otherwise anyone could add skills to another user's tech-stack just
+          by guessing/knowing their section_id.
         :param name:
         :param section_id:
+        :param user: the requesting user; section_id must belong to them
         :return:
         """
+        if not UserTechnicalSkillSection.objects.filter(id=section_id, user=user).exists():
+            return None
         try:
             with transaction.atomic():
                 already_existing = self.filter(name=name,section_id=section_id).select_for_update().first()
@@ -171,9 +176,7 @@ class UserTechnicalSkillsManager(models.Manager):
                     return None
                 result = self.get_or_create(name=name,section_id=section_id) if not already_existing else None
             if result is not None:
-                owner_user_id = UserTechnicalSkillSection.objects.filter(id=section_id).values_list('user_id', flat=True).first()
-                if owner_user_id is not None:
-                    cache_manager.delete(UserCacheKey.TECHSTACK.format(user_id=owner_user_id))
+                cache_manager.delete(UserCacheKey.TECHSTACK.format(user_id=user.id))
             return result
         except (django.db.DatabaseError, ValueError) as err:
             print(f"Error handling request: {str(err)}")
