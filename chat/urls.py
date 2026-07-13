@@ -20,8 +20,8 @@ from chat import views
 app_name = "chat"
 urlpatterns = [
     path('', views.open_chat_room, name='chat_room'),
-    path("api/send", views.chat_message_api, name="send_message"),
+    path("api/message", views.chat_message_api, name="send_message"),
     path("api/<int:conversation_id>",views.load_chat_by_id,name="load_chat"),
-    path("conversations/",views.load_user_conversations,name="load_conversations"),
-    path("conversations/projects/<int:project_id>/",views.api_project_conversations,name="project_conversations")
+    path("conversations",views.load_user_conversations,name="load_conversations"),
+    path("conversations/projects/<int:project_id>",views.api_project_conversations,name="project_conversations")
 ]

@@ -315,6 +315,24 @@ def get_repo_token(owner, repo):
     repo_stat = ProjectRepoStats.objects.filter(github_repo_link__icontains=f'{owner}/{repo}').first()
     return repo_stat.github_token if repo_stat else None
 
+def user_has_access_to_github_repo(user, owner, repo):
+    """
+    True if `user` holds a role (any role - UserProjectRole rows only exist
+    for actual members, 'visitor' is just the fallback for "no row found")
+    in at least one project that links this owner/repo.
+
+    github_proxy_view/handle_file_content take owner/repo straight from the
+    URL path with no project_id at all, so this is the only thing standing
+    between "logged in to the app" and "can read this repo's full tree and
+    file contents" - including private repos, since get_repo_token attaches
+    whatever token is stored for the repo regardless of who's asking.
+    """
+    member_project_ids = UserProjectRole.objects.filter(user=user).values_list('project_id', flat=True)
+    return ProjectRepoStats.objects.filter(
+        github_repo_link__icontains=f'{owner}/{repo}',
+        projects__id__in=member_project_ids,
+    ).exists()
+
 def fetch_github_tree_with_sizes(owner, repo, branch='main'):
     """
     Fetches the recursive git tree from GitHub, keyed by path, including each

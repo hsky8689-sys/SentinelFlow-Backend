@@ -1,14 +1,20 @@
+import hashlib
+import hmac
 import json
 import secrets
 from datetime import date
+from unittest.mock import Mock, patch
 
+from django.conf import settings
 from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
 
+from projects.github_utils import commit_was_pushed_from_app, verify_github_signature
 from projects.models import (
     AuditLogAction, Project, ProjectDomain, ProjectRepoStats, ProjectRequirementSection, ProjectRole,
-    ProjectSkillRequirement, ProjectTask, UserProjectRole,
+    ProjectSkillRequirement, ProjectTask, ProjectTaskParticipation, ResourceAccess, TaskResourceAccess,
+    UserProjectRole,
 )
 from users.models import User, UserRequest
 
@@ -1229,3 +1235,1252 @@ class ProjectLeaveTests(ProjectMembershipMixin, TestCase):
             self.assertEqual(response.status_code, 200, f"attempt {attempt + 1} should succeed, got {response.status_code}")
         blocked = self._leave(projects[20].id)
         self.assertEqual(blocked.status_code, 403, "21st DELETE within a minute should be rate-limited (user, 20/m)")
+class Judge0ApiTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.owner = make_user('projowner')
+        self.outsider = make_user('projvisitor')
+        self.project = Project.objects.create_project(self.owner.id, f'judge0proj_{secrets.token_hex(4)}', 'a project')
+
+    @staticmethod
+    def _url():
+        return reverse('projects:run-code')
+
+    def _post(self, payload):
+        return self.client.post(self._url(), data=json.dumps(payload), content_type='application/json')
+
+    # ---- business logic ----
+
+    def test_run_code_success(self):
+        with patch('projects.views.requests.post') as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {'stdout': 'hello\n', 'status': {'id': 3, 'description': 'Accepted'}}
+
+            self.client.force_login(self.owner)
+            response = self._post({'source_code': 'print("hello")', 'language_id': 71, 'project': self.project.name})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['stdout'], 'hello\n')
+
+    def test_run_code_sends_the_expected_payload_and_api_key_to_judge0(self):
+        """
+        Verifies what our own code sends, not what Judge0 does with it - the
+        whole point of mocking requests.post is that we never touch the real
+        API (the free key only allows 50 runs/day), but we can still assert
+        the outgoing request was built correctly.
+        """
+        with patch('projects.views.requests.post') as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {'stdout': 'hi\n'}
+
+            self.client.force_login(self.owner)
+            self._post({'source_code': 'print("hi")', 'language_id': 71, 'project': self.project.name})
+
+            mock_post.assert_called_once()
+            call = mock_post.call_args
+            self.assertEqual(call.kwargs['json']['source_code'], 'print("hi")')
+            self.assertEqual(call.kwargs['json']['language_id'], 71)
+            self.assertEqual(call.kwargs['headers']['X-RapidAPI-Key'], settings.RAPIDAPI_KEY)
+
+    def test_run_code_propagates_judge0_error_status(self):
+        """No real Judge0 call happens, so this is free to run as many times as we want."""
+        with patch('projects.views.requests.post') as mock_post:
+            mock_post.return_value.status_code = 429
+            mock_post.return_value.json.return_value = {'message': 'Too many requests'}
+
+            self.client.force_login(self.owner)
+            response = self._post({'source_code': 'print(1)', 'language_id': 71, 'project': self.project.name})
+
+            self.assertEqual(response.status_code, 429)
+            self.assertEqual(response.json()['message'], 'Too many requests')
+
+    def test_missing_source_code_returns_400_without_calling_judge0(self):
+        with patch('projects.views.requests.post') as mock_post:
+            self.client.force_login(self.owner)
+            response = self._post({'language_id': 71, 'project': self.project.name})
+
+            self.assertEqual(response.status_code, 400)
+            mock_post.assert_not_called()
+
+    def test_missing_project_returns_400_without_calling_judge0(self):
+        with patch('projects.views.requests.post') as mock_post:
+            self.client.force_login(self.owner)
+            response = self._post({'source_code': 'print(1)', 'language_id': 71})
+
+            self.assertEqual(response.status_code, 400)
+            mock_post.assert_not_called()
+
+    def test_nonexistent_project_returns_404_without_calling_judge0(self):
+        with patch('projects.views.requests.post') as mock_post:
+            self.client.force_login(self.owner)
+            response = self._post({'source_code': 'print(1)', 'language_id': 71, 'project': 'this_project_was_never_created'})
+
+            self.assertEqual(response.status_code, 404)
+            mock_post.assert_not_called()
+
+    # ---- security ----
+
+    def test_requires_authentication(self):
+        response = self._post({'source_code': 'print(1)', 'language_id': 71, 'project': self.project.name})
+        self.assertEqual(response.status_code, 302)
+
+    def test_visitor_cannot_run_code(self):
+        with patch('projects.views.requests.post') as mock_post:
+            self.client.force_login(self.outsider)
+            response = self._post({'source_code': 'print(1)', 'language_id': 71, 'project': self.project.name})
+
+            self.assertEqual(response.status_code, 403)
+            mock_post.assert_not_called()
+
+    def test_member_without_can_execute_code_permission_is_rejected(self):
+        member = make_user('projmember')
+        developer_role = ProjectRole.objects.get(name='developer')  # can_execute_code=False by default
+        UserProjectRole.objects.give_role_to_user(self.project.id, member.id, developer_role)
+
+        with patch('projects.views.requests.post') as mock_post:
+            self.client.force_login(member)
+            response = self._post({'source_code': 'print(1)', 'language_id': 71, 'project': self.project.name})
+
+            self.assertEqual(response.status_code, 403)
+            mock_post.assert_not_called()
+
+    # ---- rate limiting ----
+
+    def test_rate_limit_blocks_after_20_requests_per_user(self):
+        """proxy_run_code rate-limits POST by 'user' at 20/m."""
+        with patch('projects.views.requests.post') as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {'stdout': 'ok\n'}
+
+            self.client.force_login(self.owner)
+            for attempt in range(20):
+                response = self._post({'source_code': f'print({attempt})', 'language_id': 71, 'project': self.project.name})
+                self.assertEqual(response.status_code, 200, f"attempt {attempt + 1} should succeed, got {response.status_code}")
+
+            blocked = self._post({'source_code': 'print("blocked")', 'language_id': 71, 'project': self.project.name})
+            self.assertEqual(blocked.status_code, 403, "21st POST within a minute should be rate-limited (user, 20/m)")
+
+
+class GitHubSignatureVerificationTests(TestCase):
+    """
+    verify_github_signature is a pure function (no requests.post involved) -
+    it's what stands between webhook_github and anyone on the internet who
+    knows a project's webhook URL and wants to forge a push event, so it's
+    worth testing thoroughly with zero mocking needed.
+    """
+
+    def test_valid_signature_returns_true(self):
+        secret = 'my-webhook-secret'
+        body = b'{"some":"payload"}'
+        signature = 'sha256=' + hmac.new(secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
+        self.assertTrue(verify_github_signature(body, signature, secret))
+
+    def test_invalid_signature_returns_false(self):
+        body = b'{"some":"payload"}'
+        self.assertFalse(verify_github_signature(body, 'sha256=' + '0' * 64, 'my-webhook-secret'))
+
+    def test_missing_signature_header_returns_false(self):
+        self.assertFalse(verify_github_signature(b'{}', None, 'my-webhook-secret'))
+
+    def test_empty_signature_header_returns_false(self):
+        self.assertFalse(verify_github_signature(b'{}', '', 'my-webhook-secret'))
+
+    def test_signature_without_sha256_prefix_returns_false(self):
+        """GitHub always sends sha256=... on X-Hub-Signature-256 - a bare hex digest (or a sha1= one) must be rejected."""
+        secret = 'my-webhook-secret'
+        body = b'{"some":"payload"}'
+        bare_hex = hmac.new(secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
+        self.assertFalse(verify_github_signature(body, bare_hex, secret))
+        self.assertFalse(verify_github_signature(body, 'sha1=' + bare_hex, secret))
+
+    def test_signature_computed_with_the_wrong_secret_returns_false(self):
+        body = b'{"some":"payload"}'
+        signature = 'sha256=' + hmac.new(b'attackers-guess', body, hashlib.sha256).hexdigest()
+        self.assertFalse(verify_github_signature(body, signature, 'my-webhook-secret'))
+
+    def test_tampering_with_the_payload_after_signing_invalidates_it(self):
+        secret = 'my-webhook-secret'
+        original_body = b'{"amount": 10}'
+        signature = 'sha256=' + hmac.new(secret.encode('utf-8'), original_body, hashlib.sha256).hexdigest()
+        tampered_body = b'{"amount": 10000}'
+        self.assertFalse(verify_github_signature(tampered_body, signature, secret))
+
+
+class CommitProvenanceTests(TestCase):
+    """
+    commit_was_pushed_from_app is the other pure-function security check:
+    given a push webhook was legitimately signed by the right repo secret
+    (see GitHubSignatureVerificationTests above), this decides whether each
+    individual COMMIT inside it actually came from push_files() (our own
+    HMAC trailer) or was pushed some other way (manual git push, GitHub UI
+    edit) while can_only_modify_from_app is enabled.
+    """
+
+    @staticmethod
+    def _signed_message(secret, body_text):
+        signature = hmac.new(secret.encode('utf-8'), body_text.encode('utf-8'), hashlib.sha256).hexdigest()
+        return f'{body_text}\n\nX-GitSync-Sig: {signature}'
+
+    def test_commit_with_a_valid_trailer_is_recognized_as_from_the_app(self):
+        secret = 'app-signing-key'
+        commit = {'message': self._signed_message(secret, 'Pushed via GitSync: update readme | README.md | 2025-01-01T00:00:00')}
+        self.assertTrue(commit_was_pushed_from_app(commit, secret))
+
+    def test_commit_without_a_trailer_is_not_from_the_app(self):
+        commit = {'message': 'a normal manual commit message, no trailer at all'}
+        self.assertFalse(commit_was_pushed_from_app(commit, 'app-signing-key'))
+
+    def test_commit_missing_the_message_key_is_not_from_the_app(self):
+        self.assertFalse(commit_was_pushed_from_app({}, 'app-signing-key'))
+
+    def test_commit_with_a_tampered_trailer_is_not_from_the_app(self):
+        secret = 'app-signing-key'
+        real = self._signed_message(secret, 'legit message body')
+        flipped_last_char = '1' if real[-1] != '1' else '2'
+        tampered = real[:-1] + flipped_last_char
+        self.assertFalse(commit_was_pushed_from_app({'message': tampered}, secret))
+
+    def test_commit_signed_with_a_different_secret_is_not_from_the_app(self):
+        commit = {'message': self._signed_message('some-other-projects-secret', 'message body')}
+        self.assertFalse(commit_was_pushed_from_app(commit, 'app-signing-key'))
+
+    def test_commit_message_body_was_altered_after_signing_is_not_from_the_app(self):
+        """The trailer is valid for a DIFFERENT message than the one actually present - i.e. the message was edited post-signing."""
+        secret = 'app-signing-key'
+        signed = self._signed_message(secret, 'original message')
+        tampered = signed.replace('original message', 'edited message')
+        self.assertFalse(commit_was_pushed_from_app({'message': tampered}, secret))
+
+
+class WebhookGithubTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.owner = make_user('projowner')
+        self.project = Project.objects.create_project(self.owner.id, f'webhookproj_{secrets.token_hex(4)}', 'd')
+        self.repo_stat = ProjectRepoStats.objects.create(
+            github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets', github_token=''
+        )
+        self.project.repo_stats.add(self.repo_stat)
+
+    @staticmethod
+    def _url(project_id):
+        return reverse('projects:webhook-github', kwargs={'id': project_id})
+
+    @staticmethod
+    def _signed_commit_message(secret, body_text):
+        signature = hmac.new(secret.encode('utf-8'), body_text.encode('utf-8'), hashlib.sha256).hexdigest()
+        return f'{body_text}\n\nX-GitSync-Sig: {signature}'
+
+    @staticmethod
+    def _payload(commits=None, full_name='acme/widgets'):
+        return {'repository': {'full_name': full_name}, 'commits': commits or []}
+
+    def _signed_post(self, project_id, payload, secret=None):
+        secret = secret if secret is not None else self.project.app_signing_key
+        raw_body = json.dumps(payload).encode('utf-8')
+        signature = 'sha256=' + hmac.new(secret.encode('utf-8'), raw_body, hashlib.sha256).hexdigest()
+        return self.client.post(
+            self._url(project_id), data=raw_body, content_type='application/json',
+            HTTP_X_HUB_SIGNATURE_256=signature
+        )
+
+    # ---- business logic ----
+
+    def test_missing_repository_info_returns_400(self):
+        response = self._signed_post(self.project.id, {'commits': []})
+        self.assertEqual(response.status_code, 400)
+
+    def test_untracked_repo_returns_400(self):
+        response = self._signed_post(self.project.id, self._payload(full_name='someone/else'))
+        self.assertEqual(response.status_code, 400)
+
+    def test_nonexistent_project_returns_404(self):
+        response = self._signed_post(self.project.id + 100_000, self._payload())
+        self.assertEqual(response.status_code, 404)
+
+    def test_when_push_policy_disabled_nothing_is_enforced(self):
+        """can_only_modify_from_app is False by default - an unsigned commit shouldn't get flagged."""
+        response = self._signed_post(self.project.id, self._payload(commits=[{'message': 'anything, unsigned'}]))
+        self.assertEqual(response.status_code, 200)
+        self.project.refresh_from_db()
+        self.assertFalse(self.project.flagged_external_push)
+
+    def test_all_commits_from_app_does_not_flag(self):
+        self.project.can_only_modify_from_app = True
+        self.project.save(update_fields=['can_only_modify_from_app'])
+        commit = {'message': self._signed_commit_message(self.project.app_signing_key, 'legit push | file.py | 2025-01-01')}
+
+        response = self._signed_post(self.project.id, self._payload(commits=[commit]))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()['flagged_external_push'])
+        self.project.refresh_from_db()
+        self.assertFalse(self.project.flagged_external_push)
+
+    def test_commit_not_from_app_flags_the_project(self):
+        self.project.can_only_modify_from_app = True
+        self.project.save(update_fields=['can_only_modify_from_app'])
+        commit = {'message': 'a manual git push, no GitSync trailer'}
+
+        response = self._signed_post(self.project.id, self._payload(commits=[commit]))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['flagged_external_push'])
+        self.project.refresh_from_db()
+        self.assertTrue(self.project.flagged_external_push)
+
+    # ---- security ----
+
+    def test_invalid_signature_is_rejected(self):
+        response = self._signed_post(self.project.id, self._payload(), secret='wrong-secret')
+        self.assertEqual(response.status_code, 403)
+
+    def test_missing_signature_header_is_rejected(self):
+        raw_body = json.dumps(self._payload()).encode('utf-8')
+        response = self.client.post(self._url(self.project.id), data=raw_body, content_type='application/json')
+        self.assertEqual(response.status_code, 403)
+
+    def test_payload_tampered_with_after_signing_is_rejected(self):
+        secret = self.project.app_signing_key
+        raw_body = json.dumps(self._payload()).encode('utf-8')
+        signature = 'sha256=' + hmac.new(secret.encode('utf-8'), raw_body, hashlib.sha256).hexdigest()
+        tampered_body = json.dumps(self._payload(commits=[{'message': 'sneaky extra commit'}])).encode('utf-8')
+
+        response = self.client.post(
+            self._url(self.project.id), data=tampered_body, content_type='application/json',
+            HTTP_X_HUB_SIGNATURE_256=signature
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_url_project_id_is_respected_even_when_a_repo_is_shared_between_two_projects(self):
+        """
+        Regression test for a real bug: webhook_github used to re-look-up
+        the repo_stat with a GLOBAL, unscoped query and reassign
+        `project = repo_stat.projects.first()`. Since ProjectRepoStats can
+        be shared by several projects (Project.repo_stats is M2M), a repo
+        linked to two projects meant every webhook always resolved to
+        whichever project got linked first, ignoring the URL's own id for
+        the signature check and the flagging that followed. Now the
+        already-validated `project` from the URL is used throughout, so a
+        webhook aimed at project B, signed with B's own key, is checked and
+        flagged against B - regardless of insertion order or what A's key is.
+        """
+        other_project = Project.objects.create_project(self.owner.id, f'webhookproj_other_{secrets.token_hex(4)}', 'd')
+        other_project.repo_stats.add(self.repo_stat)  # same repo_stat, now shared by self.project and other_project
+        other_project.can_only_modify_from_app = True
+        other_project.save(update_fields=['can_only_modify_from_app'])
+
+        secret = other_project.app_signing_key
+        raw_body = json.dumps(self._payload(commits=[{'message': 'unsigned manual push'}])).encode('utf-8')
+        signature = 'sha256=' + hmac.new(secret.encode('utf-8'), raw_body, hashlib.sha256).hexdigest()
+        response = self.client.post(
+            self._url(other_project.id), data=raw_body, content_type='application/json',
+            HTTP_X_HUB_SIGNATURE_256=signature
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['flagged_external_push'])
+
+        other_project.refresh_from_db()
+        self.assertTrue(other_project.flagged_external_push, "the project addressed by the URL must be the one flagged")
+        self.project.refresh_from_db()
+        self.assertFalse(self.project.flagged_external_push, "the OTHER project sharing the repo must be untouched")
+
+
+def github_get_router(**url_suffix_to_response):
+    """
+    Builds a requests.get side_effect for mocking projects.github_utils.requests.get,
+    which is called by several different helper functions hitting different GitHub
+    endpoints (repo metadata, branches list, branch protection, refs/heads/<branch>) in
+    the same request - a single fixed return_value can't serve all of them. Keys are
+    matched against the end of the requested URL; values are (status_code, json_body).
+    """
+    def side_effect(url, *args, **kwargs):
+        for suffix, (status_code, json_body) in url_suffix_to_response.items():
+            if url.endswith(suffix):
+                resp = Mock()
+                resp.status_code = status_code
+                resp.ok = 200 <= status_code < 300
+                resp.json.return_value = json_body
+                return resp
+        raise AssertionError(f"Unexpected GET url in test, no mock configured for it: {url}")
+    return side_effect
+
+
+class GithubBranchListingTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.owner = make_user('projowner')
+        self.outsider = make_user('projvisitor')
+        self.project = Project.objects.create_project(self.owner.id, f'branchlistproj_{secrets.token_hex(4)}', 'd')
+        self.repo_stat = ProjectRepoStats.objects.create(
+            github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets', github_token=''
+        )
+        self.project.repo_stats.add(self.repo_stat)
+
+    @staticmethod
+    def _url():
+        return reverse('projects:get-all-repo-branches')
+
+    def _get(self, params):
+        return self.client.get(self._url(), params)
+
+    @staticmethod
+    def _router(is_private=False, branches=('main',)):
+        return github_get_router(**{
+            '/acme/widgets': (200, {'visibility': 'private' if is_private else 'public'}),
+            '/branches': (200, [{'name': b} for b in branches]),
+        })
+
+    # ---- business logic ----
+
+    def test_lists_branches_for_a_public_repo(self):
+        with patch('projects.github_utils.requests.get') as mock_get:
+            mock_get.side_effect = self._router(is_private=False, branches=['main', 'dev'])
+            self.client.force_login(self.owner)
+            response = self._get({'project': self.project.name})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['branches'], ['main', 'dev'])
+
+    def test_lists_branches_for_a_private_repo(self):
+        """Exercises the is_repo_private()==True branch, which sends an Authorization header on the branches call too."""
+        with patch('projects.github_utils.requests.get') as mock_get:
+            mock_get.side_effect = self._router(is_private=True, branches=['main'])
+            self.client.force_login(self.owner)
+            response = self._get({'project': self.project.name})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['branches'], ['main'])
+
+    def test_missing_project_name_does_not_call_github(self):
+        with patch('projects.github_utils.requests.get') as mock_get:
+            self.client.force_login(self.owner)
+            response = self._get({})
+            self.assertIn(response.status_code, (400, 403))
+            mock_get.assert_not_called()
+
+    def test_nonexistent_project_returns_404_without_calling_github(self):
+        with patch('projects.github_utils.requests.get') as mock_get:
+            self.client.force_login(self.owner)
+            response = self._get({'project': 'this_project_was_never_created'})
+            self.assertEqual(response.status_code, 404)
+            mock_get.assert_not_called()
+
+    def test_repo_not_linked_to_project_does_not_call_github(self):
+        with patch('projects.github_utils.requests.get') as mock_get:
+            self.client.force_login(self.owner)
+            response = self._get({'project': self.project.name, 'repo_id': 999_999})
+            self.assertNotEqual(response.status_code, 200)
+            mock_get.assert_not_called()
+
+    def test_github_failure_returns_500(self):
+        """No real GitHub outage needed to test this - we just make the mock fail."""
+        with patch('projects.github_utils.requests.get') as mock_get:
+            mock_get.side_effect = github_get_router(**{
+                '/acme/widgets': (200, {'visibility': 'public'}),
+                '/branches': (404, {'message': 'Not Found'}),
+            })
+            self.client.force_login(self.owner)
+            response = self._get({'project': self.project.name})
+            self.assertEqual(response.status_code, 500)
+
+    # ---- security ----
+
+    def test_requires_authentication(self):
+        response = self._get({'project': self.project.name})
+        self.assertEqual(response.status_code, 302)
+
+    def test_outsider_can_view_branches_with_no_membership_check(self):
+        """
+        Documents current behavior, not a requirement: unlike
+        _get_project_domains/_get_project_requirements/_get_project_push_policy
+        (which we already locked down to require membership),
+        api_github_get_all_repo_branches still has no role check at all.
+        """
+        with patch('projects.github_utils.requests.get') as mock_get:
+            mock_get.side_effect = self._router()
+            self.client.force_login(self.outsider)
+            response = self._get({'project': self.project.name})
+            self.assertEqual(response.status_code, 200)
+
+    # ---- rate limiting ----
+
+    def test_rate_limit_blocks_after_60_requests_per_user(self):
+        """api_github_get_all_repo_branches rate-limits GET by 'user' at 60/m."""
+        with patch('projects.github_utils.requests.get') as mock_get:
+            mock_get.side_effect = self._router()
+            self.client.force_login(self.owner)
+            for attempt in range(60):
+                response = self._get({'project': self.project.name})
+                self.assertEqual(response.status_code, 200, f"attempt {attempt + 1} should succeed, got {response.status_code}")
+            blocked = self._get({'project': self.project.name})
+            self.assertEqual(blocked.status_code, 403, "61st GET within a minute should be rate-limited (user, 60/m)")
+
+
+class GithubBranchActionTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.owner = make_user('projowner')
+        self.member = make_user('projmember')
+        self.outsider = make_user('projvisitor')
+        self.project = Project.objects.create_project(self.owner.id, f'branchactionproj_{secrets.token_hex(4)}', 'd')
+        self.repo_stat = ProjectRepoStats.objects.create(
+            github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets', github_token=''
+        )
+        self.project.repo_stats.add(self.repo_stat)
+        developer_role = ProjectRole.objects.get(name='developer')
+        UserProjectRole.objects.give_role_to_user(self.project.id, self.member.id, developer_role)
+
+    @staticmethod
+    def _url(project_id):
+        return reverse('projects:add-branch-on-github-repo', kwargs={'id': project_id})
+
+    def _post(self, project_id):
+        return self.client.post(self._url(project_id))
+
+    def _put(self, project_id, payload):
+        return self.client.put(self._url(project_id), data=json.dumps(payload), content_type='application/json')
+
+    def _delete(self, project_id, payload):
+        return self.client.delete(self._url(project_id), data=json.dumps(payload), content_type='application/json')
+
+    # ---- POST: add a new branch ----
+
+    def test_owner_can_add_a_branch(self):
+        with patch('projects.github_utils.requests.get') as mock_get, \
+             patch('projects.github_utils.requests.post') as mock_post:
+            mock_get.side_effect = github_get_router(**{
+                '/acme/widgets': (200, {'default_branch': 'main'}),
+                '/git/refs/heads/main': (200, {'object': {'sha': 'abc123'}}),
+            })
+            mock_post.return_value = Mock(status_code=201)
+
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id)
+            self.assertEqual(response.status_code, 200)
+            mock_post.assert_called_once()
+            self.assertEqual(mock_post.call_args.kwargs['json']['sha'], 'abc123')
+
+    def test_add_branch_github_failure_is_reported(self):
+        with patch('projects.github_utils.requests.get') as mock_get, \
+             patch('projects.github_utils.requests.post') as mock_post:
+            mock_get.side_effect = github_get_router(**{
+                '/acme/widgets': (200, {'default_branch': 'main'}),
+                '/git/refs/heads/main': (200, {'object': {'sha': 'abc123'}}),
+            })
+            mock_post.return_value = Mock(status_code=422, json=lambda: {'message': 'Reference already exists'})
+
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id)
+            self.assertNotEqual(response.status_code, 200)
+
+    def test_non_privileged_member_cannot_add_a_branch(self):
+        """'developer' has can_create_branches=True, so use a role without it - viewer."""
+        viewer = make_user('projviewer')
+        viewer_role = ProjectRole.objects.get(name='viewer')
+        UserProjectRole.objects.give_role_to_user(self.project.id, viewer.id, viewer_role)
+
+        with patch('projects.github_utils.requests.post') as mock_post:
+            self.client.force_login(viewer)
+            response = self._post(self.project.id)
+            self.assertEqual(response.status_code, 403)
+            mock_post.assert_not_called()
+
+    def test_outsider_cannot_add_a_branch(self):
+        with patch('projects.github_utils.requests.post') as mock_post:
+            self.client.force_login(self.outsider)
+            response = self._post(self.project.id)
+            self.assertEqual(response.status_code, 403)
+            mock_post.assert_not_called()
+
+    def test_add_branch_requires_authentication(self):
+        response = self._post(self.project.id)
+        self.assertEqual(response.status_code, 302)
+
+    # ---- PUT: rename a branch ----
+
+    def test_owner_can_rename_a_branch(self):
+        """
+        Regression test for a real bug: this used to check
+        visitor_permissions['can_modify_branches'], a key that didn't exist
+        anywhere (not on the ProjectRole model, not in get_role_permissions'
+        permission_keys) - every PUT request raised an uncaught KeyError.
+        """
+        with patch('projects.github_utils.requests.post') as mock_post:
+            mock_post.return_value = Mock(status_code=201)
+            self.client.force_login(self.owner)
+            response = self._put(self.project.id, {'branch_name': 'old-name', 'new_name': 'new-name'})
+            self.assertEqual(response.status_code, 200)
+            mock_post.assert_called_once()
+
+    def test_rename_branch_missing_fields_returns_400(self):
+        with patch('projects.github_utils.requests.post') as mock_post:
+            self.client.force_login(self.owner)
+            response = self._put(self.project.id, {'branch_name': 'old-name'})
+            self.assertEqual(response.status_code, 400)
+            mock_post.assert_not_called()
+
+    def test_non_privileged_member_cannot_rename_a_branch(self):
+        viewer = make_user('projviewer')
+        viewer_role = ProjectRole.objects.get(name='viewer')
+        UserProjectRole.objects.give_role_to_user(self.project.id, viewer.id, viewer_role)
+
+        with patch('projects.github_utils.requests.post') as mock_post:
+            self.client.force_login(viewer)
+            response = self._put(self.project.id, {'branch_name': 'old-name', 'new_name': 'new-name'})
+            self.assertEqual(response.status_code, 403)
+            mock_post.assert_not_called()
+
+    # ---- DELETE: delete a branch ----
+
+    def test_owner_can_delete_a_branch(self):
+        with patch('projects.github_utils.requests.get') as mock_get, \
+             patch('projects.github_utils.requests.delete') as mock_delete:
+            mock_get.side_effect = github_get_router(**{'/acme/widgets': (200, {'default_branch': 'main'})})
+            mock_delete.return_value = Mock(status_code=204, content=b'')
+
+            self.client.force_login(self.owner)
+            response = self._delete(self.project.id, {'branch_name': 'feature-branch'})
+            self.assertEqual(response.status_code, 200)
+            mock_delete.assert_called_once()
+
+    def test_cannot_delete_the_default_branch(self):
+        with patch('projects.github_utils.requests.get') as mock_get, \
+             patch('projects.github_utils.requests.delete') as mock_delete:
+            mock_get.side_effect = github_get_router(**{'/acme/widgets': (200, {'default_branch': 'main'})})
+
+            self.client.force_login(self.owner)
+            response = self._delete(self.project.id, {'branch_name': 'main'})
+            self.assertEqual(response.status_code, 400)
+            mock_delete.assert_not_called()
+
+    def test_non_privileged_member_cannot_delete_a_branch(self):
+        with patch('projects.github_utils.requests.get') as mock_get, \
+             patch('projects.github_utils.requests.delete') as mock_delete:
+            self.client.force_login(self.member)  # 'developer' has can_delete_branches=False
+            response = self._delete(self.project.id, {'branch_name': 'feature-branch'})
+            self.assertEqual(response.status_code, 403)
+            mock_get.assert_not_called()
+            mock_delete.assert_not_called()
+
+    # ---- rate limiting ----
+
+    def test_rate_limit_blocks_after_15_requests_per_user(self):
+        """api_github_handle_branch_action rate-limits (POST/PUT/DELETE share the same 'user' key) at 15/m."""
+        with patch('projects.github_utils.requests.get') as mock_get, \
+             patch('projects.github_utils.requests.post') as mock_post:
+            mock_get.side_effect = github_get_router(**{
+                '/acme/widgets': (200, {'default_branch': 'main'}),
+                '/git/refs/heads/main': (200, {'object': {'sha': 'abc123'}}),
+            })
+            mock_post.return_value = Mock(status_code=201)
+
+            self.client.force_login(self.owner)
+            for attempt in range(15):
+                response = self._post(self.project.id)
+                self.assertEqual(response.status_code, 200, f"attempt {attempt + 1} should succeed, got {response.status_code}")
+            blocked = self._post(self.project.id)
+            self.assertEqual(blocked.status_code, 403, "16th request within a minute should be rate-limited (user, 15/m)")
+
+
+class GithubMergeBranchesTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.owner = make_user('projowner')
+        self.outsider = make_user('projvisitor')
+        self.project = Project.objects.create_project(self.owner.id, f'mergeproj_{secrets.token_hex(4)}', 'd')
+        self.repo_stat = ProjectRepoStats.objects.create(
+            github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets', github_token=''
+        )
+        self.project.repo_stats.add(self.repo_stat)
+
+    @staticmethod
+    def _url(project_id):
+        return reverse('projects:merge-branches', kwargs={'id': project_id})
+
+    def _post(self, project_id, payload):
+        return self.client.post(self._url(project_id), data=json.dumps(payload), content_type='application/json')
+
+    # ---- business logic ----
+
+    def test_owner_can_merge_branches(self):
+        with patch('projects.views.requests.post') as mock_post:
+            mock_post.return_value = Mock(status_code=201)
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id, {'base': 'main', 'head': 'feature'})
+            self.assertEqual(response.status_code, 200)
+            mock_post.assert_called_once()
+            self.assertEqual(mock_post.call_args.kwargs['json']['base'], 'main')
+            self.assertEqual(mock_post.call_args.kwargs['json']['head'], 'feature')
+
+    def test_missing_base_or_head_does_not_call_github(self):
+        with patch('projects.views.requests.post') as mock_post:
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id, {'base': 'main'})
+            self.assertNotEqual(response.status_code, 200)
+            mock_post.assert_not_called()
+
+    def test_merge_conflict_is_reported(self):
+        with patch('projects.views.requests.post') as mock_post:
+            mock_post.return_value = Mock(status_code=409)
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id, {'base': 'main', 'head': 'feature'})
+            self.assertEqual(response.status_code, 409)
+
+    def test_nothing_to_merge_is_reported(self):
+        mock_post_response = Mock(status_code=204)
+        with patch('projects.views.requests.post', return_value=mock_post_response):
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id, {'base': 'main', 'head': 'feature'})
+            self.assertEqual(response.status_code, 204)
+
+    # ---- security ----
+
+    def test_requires_authentication(self):
+        response = self._post(self.project.id, {'base': 'main', 'head': 'feature'})
+        self.assertEqual(response.status_code, 302)
+
+    def test_non_privileged_member_cannot_merge(self):
+        member = make_user('projmember')
+        developer_role = ProjectRole.objects.get(name='developer')  # can_merge_branches=False
+        UserProjectRole.objects.give_role_to_user(self.project.id, member.id, developer_role)
+
+        with patch('projects.views.requests.post') as mock_post:
+            self.client.force_login(member)
+            response = self._post(self.project.id, {'base': 'main', 'head': 'feature'})
+            self.assertEqual(response.status_code, 403)
+            mock_post.assert_not_called()
+
+    def test_outsider_cannot_merge(self):
+        with patch('projects.views.requests.post') as mock_post:
+            self.client.force_login(self.outsider)
+            response = self._post(self.project.id, {'base': 'main', 'head': 'feature'})
+            self.assertEqual(response.status_code, 403)
+            mock_post.assert_not_called()
+
+    # ---- rate limiting ----
+
+    def test_rate_limit_blocks_after_15_requests_per_user(self):
+        """api_merge_github_branches rate-limits POST by 'user' at 15/m."""
+        with patch('projects.views.requests.post') as mock_post:
+            mock_post.return_value = Mock(status_code=201)
+            self.client.force_login(self.owner)
+            for attempt in range(15):
+                response = self._post(self.project.id, {'base': 'main', 'head': f'feature{attempt}'})
+                self.assertEqual(response.status_code, 200, f"attempt {attempt + 1} should succeed, got {response.status_code}")
+            blocked = self._post(self.project.id, {'base': 'main', 'head': 'feature-blocked'})
+            self.assertEqual(blocked.status_code, 403, "16th POST within a minute should be rate-limited (user, 15/m)")
+
+
+class ProjectRepositoryLinkingTests(TestCase):
+    """
+    _add_project_repository / _delete_project_repository - the most involved
+    mocking in the GitHub suite: adding a repo can chain a webhook
+    registration (POST) with, if the project's push policy is on, branch
+    protection (GET default branch, GET existing protection, GET github
+    username, PUT protection). Removing a protected repo chains its own
+    revert (DELETE or PUT depending on whether protection pre-existed).
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.owner = make_user('projowner')
+        self.member = make_user('projmember')
+        self.outsider = make_user('projvisitor')
+        self.project = Project.objects.create_project(self.owner.id, f'repolinkproj_{secrets.token_hex(4)}', 'd')
+        developer_role = ProjectRole.objects.get(name='developer')  # can_change_project_settings=False
+        UserProjectRole.objects.give_role_to_user(self.project.id, self.member.id, developer_role)
+
+    @staticmethod
+    def _url(project_id):
+        return reverse('projects:add-repo-to-project', kwargs={'id': project_id})
+
+    def _post(self, project_id, payload):
+        return self.client.post(self._url(project_id), data=json.dumps(payload), content_type='application/json')
+
+    def _delete(self, project_id, payload):
+        return self.client.delete(self._url(project_id), data=json.dumps(payload), content_type='application/json')
+
+    @staticmethod
+    def _repo_payload(**overrides):
+        payload = {
+            'github_repo_name': 'widgets',
+            'github_repo_link': 'https://github.com/acme/widgets',
+            'github_token': '',
+        }
+        payload.update(overrides)
+        return payload
+
+    # ---- POST: add a repo, push policy off (no branch protection attempted) ----
+
+    def test_owner_can_add_a_repo_when_push_policy_is_off(self):
+        with patch('projects.github_utils.requests.post') as mock_post:
+            mock_post.return_value = Mock(status_code=201)
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id, self._repo_payload())
+
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertTrue(data['webhook_registered'])
+            self.assertFalse(data['branch_protection_applied'], "can_only_modify_from_app is False by default - protection shouldn't be attempted")
+
+            repo_stat = ProjectRepoStats.objects.get(id=data['repo_id'])
+            self.assertEqual(repo_stat.github_repo_link, 'https://github.com/acme/widgets')
+            self.assertIn(repo_stat, self.project.repo_stats.all())
+
+    def test_webhook_registration_failure_does_not_block_linking_the_repo(self):
+        """register_github_webhook is best-effort - a repo is still linked even if GitHub rejects the webhook."""
+        with patch('projects.github_utils.requests.post') as mock_post:
+            mock_post.return_value = Mock(status_code=422)  # GitHub rejected it
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id, self._repo_payload())
+
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.json()['webhook_registered'])
+            self.assertTrue(ProjectRepoStats.objects.filter(id=response.json()['repo_id']).exists())
+
+    def test_response_never_echoes_the_access_token(self):
+        with patch('projects.github_utils.requests.post') as mock_post:
+            mock_post.return_value = Mock(status_code=201)
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id, self._repo_payload(github_token='ghp_supersecrettoken'))
+
+            self.assertNotIn('ghp_supersecrettoken', response.content.decode())
+
+    def test_missing_required_fields_returns_400(self):
+        with patch('projects.github_utils.requests.post') as mock_post:
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id, {'github_token': 'x'})
+            self.assertEqual(response.status_code, 400)
+            mock_post.assert_not_called()
+
+    # ---- POST: add a repo, push policy on (branch protection is attempted too) ----
+
+    def test_add_repo_with_push_policy_on_also_applies_branch_protection(self):
+        self.project.can_only_modify_from_app = True
+        self.project.save(update_fields=['can_only_modify_from_app'])
+
+        with patch('projects.github_utils.requests.get') as mock_get, \
+             patch('projects.github_utils.requests.post') as mock_post, \
+             patch('projects.github_utils.requests.put') as mock_put:
+            mock_get.side_effect = github_get_router(**{
+                '/acme/widgets': (200, {'default_branch': 'main'}),
+                '/branches/main/protection': (404, {'message': 'Branch not protected'}),
+                '/user': (200, {'login': 'app-bot'}),
+            })
+            mock_post.return_value = Mock(status_code=201)  # webhook registration
+            mock_put.return_value = Mock(status_code=200)  # branch protection PUT
+
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id, self._repo_payload())
+
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertTrue(data['webhook_registered'])
+            self.assertTrue(data['branch_protection_applied'])
+
+            repo_stat = ProjectRepoStats.objects.get(id=data['repo_id'])
+            self.assertEqual(repo_stat.protected_branch, 'main')
+
+    def test_branch_protection_failure_is_reported_but_repo_stays_linked(self):
+        self.project.can_only_modify_from_app = True
+        self.project.save(update_fields=['can_only_modify_from_app'])
+
+        with patch('projects.github_utils.requests.get') as mock_get, \
+             patch('projects.github_utils.requests.post') as mock_post, \
+             patch('projects.github_utils.requests.put') as mock_put:
+            mock_get.side_effect = github_get_router(**{
+                '/acme/widgets': (200, {'default_branch': 'main'}),
+                '/branches/main/protection': (404, {'message': 'Branch not protected'}),
+                '/user': (200, {'login': 'app-bot'}),
+            })
+            mock_post.return_value = Mock(status_code=201)
+            mock_put.return_value = Mock(status_code=403)  # GitHub refuses (e.g. token lacks admin rights)
+
+            self.client.force_login(self.owner)
+            response = self._post(self.project.id, self._repo_payload())
+
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.json()['branch_protection_applied'])
+            self.assertTrue(ProjectRepoStats.objects.filter(id=response.json()['repo_id']).exists())
+
+    # ---- POST: security ----
+
+    def test_add_repo_requires_authentication(self):
+        response = self._post(self.project.id, self._repo_payload())
+        self.assertEqual(response.status_code, 302)
+
+    def test_non_privileged_member_cannot_add_a_repo(self):
+        with patch('projects.github_utils.requests.post') as mock_post:
+            self.client.force_login(self.member)  # 'developer': can_change_project_settings=False
+            response = self._post(self.project.id, self._repo_payload())
+            self.assertEqual(response.status_code, 403)
+            mock_post.assert_not_called()
+            self.assertFalse(ProjectRepoStats.objects.exists())
+
+    def test_outsider_cannot_add_a_repo(self):
+        with patch('projects.github_utils.requests.post') as mock_post:
+            self.client.force_login(self.outsider)
+            response = self._post(self.project.id, self._repo_payload())
+            self.assertEqual(response.status_code, 403)
+            mock_post.assert_not_called()
+
+    # ---- DELETE: remove an unprotected repo (no GitHub calls at all) ----
+
+    def test_owner_can_remove_an_unprotected_repo(self):
+        repo_stat = ProjectRepoStats.objects.create(github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets')
+        self.project.repo_stats.add(repo_stat)
+
+        with patch('projects.github_utils.requests.delete') as mock_delete, \
+             patch('projects.github_utils.requests.put') as mock_put:
+            self.client.force_login(self.owner)
+            response = self._delete(self.project.id, {'repo_id': repo_stat.id})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(
+                self.project.repo_stats.filter(id=repo_stat.id).exists(),
+                "repo_stats.remove() only unlinks the M2M row, it doesn't delete ProjectRepoStats itself"
+            )
+            mock_delete.assert_not_called()
+            mock_put.assert_not_called()
+
+    def test_delete_missing_repo_id_returns_400(self):
+        self.client.force_login(self.owner)
+        response = self._delete(self.project.id, {})
+        self.assertEqual(response.status_code, 400)
+
+    def test_delete_repo_not_linked_to_this_project_returns_404(self):
+        unlinked_repo = ProjectRepoStats.objects.create(github_repo_name='other', github_repo_link='https://github.com/acme/other')
+        self.client.force_login(self.owner)
+        response = self._delete(self.project.id, {'repo_id': unlinked_repo.id})
+        self.assertEqual(response.status_code, 404)
+
+    # ---- DELETE: remove a protected repo (reverts branch protection first) ----
+
+    def test_removing_a_previously_unprotected_branch_deletes_the_protection(self):
+        """previous_branch_protection is empty - it was protected by US, with nothing to restore, so DELETE removes it outright."""
+        repo_stat = ProjectRepoStats.objects.create(
+            github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets',
+            protected_branch='main', previous_branch_protection='',
+        )
+        self.project.repo_stats.add(repo_stat)
+
+        with patch('projects.github_utils.requests.delete') as mock_delete:
+            mock_delete.return_value = Mock(status_code=204)
+            self.client.force_login(self.owner)
+            response = self._delete(self.project.id, {'repo_id': repo_stat.id})
+
+            self.assertEqual(response.status_code, 200)
+            mock_delete.assert_called_once()
+            self.assertFalse(
+                self.project.repo_stats.filter(id=repo_stat.id).exists(),
+                "repo_stats.remove() only unlinks the M2M row, it doesn't delete ProjectRepoStats itself"
+            )
+
+    def test_removing_a_previously_protected_branch_restores_the_old_protection(self):
+        """previous_branch_protection has a saved snapshot - revert PUTs it back instead of deleting protection outright."""
+        repo_stat = ProjectRepoStats.objects.create(
+            github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets',
+            protected_branch='main',
+            previous_branch_protection=json.dumps({
+                'required_status_checks': None,
+                'enforce_admins': {'enabled': True},
+                'required_pull_request_reviews': {'required_approving_review_count': 2},
+                'restrictions': {'users': [{'login': 'someone'}], 'teams': [], 'apps': []},
+            }),
+        )
+        self.project.repo_stats.add(repo_stat)
+
+        with patch('projects.github_utils.requests.put') as mock_put:
+            mock_put.return_value = Mock(status_code=200)
+            self.client.force_login(self.owner)
+            response = self._delete(self.project.id, {'repo_id': repo_stat.id})
+
+            self.assertEqual(response.status_code, 200)
+            mock_put.assert_called_once()
+            self.assertEqual(mock_put.call_args.kwargs['json']['restrictions']['users'], ['someone'])
+            self.assertFalse(
+                self.project.repo_stats.filter(id=repo_stat.id).exists(),
+                "repo_stats.remove() only unlinks the M2M row, it doesn't delete ProjectRepoStats itself"
+            )
+
+    # ---- DELETE: security ----
+
+    def test_delete_repo_requires_authentication(self):
+        repo_stat = ProjectRepoStats.objects.create(github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets')
+        self.project.repo_stats.add(repo_stat)
+        response = self._delete(self.project.id, {'repo_id': repo_stat.id})
+        self.assertEqual(response.status_code, 302)
+
+    def test_non_privileged_member_cannot_remove_a_repo(self):
+        repo_stat = ProjectRepoStats.objects.create(github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets')
+        self.project.repo_stats.add(repo_stat)
+
+        self.client.force_login(self.member)
+        response = self._delete(self.project.id, {'repo_id': repo_stat.id})
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(ProjectRepoStats.objects.filter(id=repo_stat.id).exists())
+
+    def test_outsider_cannot_remove_a_repo(self):
+        repo_stat = ProjectRepoStats.objects.create(github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets')
+        self.project.repo_stats.add(repo_stat)
+
+        self.client.force_login(self.outsider)
+        response = self._delete(self.project.id, {'repo_id': repo_stat.id})
+        self.assertEqual(response.status_code, 403)
+
+    # ---- rate limiting ----
+
+    def test_rate_limit_blocks_after_30_requests_per_user(self):
+        """api_handle_project_repositories rate-limits (POST+DELETE share the same 'user' key) at 30/m."""
+        with patch('projects.github_utils.requests.post') as mock_post:
+            mock_post.return_value = Mock(status_code=201)
+            self.client.force_login(self.owner)
+            for attempt in range(30):
+                response = self._post(self.project.id, self._repo_payload(github_repo_name=f'repo{attempt}'))
+                self.assertEqual(response.status_code, 200, f"attempt {attempt + 1} should succeed, got {response.status_code}")
+            blocked = self._post(self.project.id, self._repo_payload(github_repo_name='repo-blocked'))
+            self.assertEqual(blocked.status_code, 403, "31st request within a minute should be rate-limited (user, 30/m)")
+
+
+class GithubProxyViewTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.owner = make_user('projowner')
+        self.outsider = make_user('projvisitor')
+        self.project = Project.objects.create_project(self.owner.id, f'proxyviewproj_{secrets.token_hex(4)}', 'd')
+        self.repo_stat = ProjectRepoStats.objects.create(
+            github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets', github_token=''
+        )
+        self.project.repo_stats.add(self.repo_stat)
+
+    @staticmethod
+    def _tree_url(owner='acme', repo='widgets'):
+        return reverse('projects:github-fetch-structure', kwargs={'owner': owner, 'repo': repo})
+
+    @staticmethod
+    def _file_url(path, owner='acme', repo='widgets'):
+        return reverse('projects:github-fetch-path', kwargs={'owner': owner, 'repo': repo, 'path': path})
+
+    # ---- security ----
+
+    def test_non_member_cannot_browse_a_repo_linked_to_someone_elses_project(self):
+        """
+        Regression test for a real bug: github_proxy_view/handle_file_content
+        took owner/repo straight from the URL with no project reference and
+        no membership check at all - any logged-in user could read any
+        linked repo's full tree and file contents, private or not, just by
+        knowing/guessing the owner/repo pair.
+        """
+        with patch('projects.views.requests.get') as mock_get:
+            self.client.force_login(self.outsider)
+            response = self.client.get(self._tree_url(), {'branch': 'main'})
+            self.assertEqual(response.status_code, 403)
+            mock_get.assert_not_called()
+
+    def test_repo_never_linked_to_any_project_is_inaccessible(self):
+        with patch('projects.views.requests.get') as mock_get:
+            self.client.force_login(self.owner)
+            response = self.client.get(self._tree_url(owner='someoneelse', repo='unlinked-repo'), {'branch': 'main'})
+            self.assertEqual(response.status_code, 403)
+            mock_get.assert_not_called()
+
+    def test_requires_authentication(self):
+        response = self.client.get(self._tree_url(), {'branch': 'main'})
+        self.assertEqual(response.status_code, 302)
+
+    def test_non_member_cannot_fetch_file_content_either(self):
+        with patch('projects.views.requests.get') as mock_get:
+            self.client.force_login(self.outsider)
+            response = self.client.get(self._file_url('README.md'), {'branch': 'main'})
+            self.assertEqual(response.status_code, 403)
+            mock_get.assert_not_called()
+
+    # ---- business logic: tree ----
+
+    def test_project_member_can_fetch_the_tree(self):
+        with patch('projects.views.requests.get') as mock_get:
+            mock_get.return_value = Mock(status_code=200, json=lambda: {'tree': [
+                {'path': 'README.md', 'type': 'blob'},
+                {'path': 'src', 'type': 'tree'},
+            ]})
+            self.client.force_login(self.owner)
+            response = self.client.get(self._tree_url(), {'branch': 'main'})
+            self.assertEqual(response.status_code, 200)
+            names = {item['name'] for item in response.json()}
+            self.assertEqual(names, {'README.md', 'src'})
+
+    def test_tree_is_cached_after_the_first_fetch(self):
+        with patch('projects.views.requests.get') as mock_get:
+            mock_get.return_value = Mock(status_code=200, json=lambda: {'tree': [{'path': 'README.md', 'type': 'blob'}]})
+            self.client.force_login(self.owner)
+            self.client.get(self._tree_url(), {'branch': 'main'})
+            self.client.get(self._tree_url(), {'branch': 'main'})
+            self.assertEqual(mock_get.call_count, 1, "second request should be served from cache, not hit GitHub again")
+
+    def test_falls_back_to_master_when_main_branch_tree_is_missing(self):
+        with patch('projects.views.requests.get') as mock_get:
+            mock_get.side_effect = [
+                Mock(status_code=404, json=lambda: {'message': 'Not Found'}),
+                Mock(status_code=200, json=lambda: {'tree': [{'path': 'README.md', 'type': 'blob'}]}),
+            ]
+            self.client.force_login(self.owner)
+            response = self.client.get(self._tree_url(), {'branch': 'main'})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(mock_get.call_count, 2)
+
+    def test_github_error_status_is_propagated(self):
+        with patch('projects.views.requests.get') as mock_get:
+            mock_get.return_value = Mock(status_code=500, json=lambda: {'message': 'Server error'})
+            self.client.force_login(self.owner)
+            response = self.client.get(self._tree_url(), {'branch': 'develop'})
+            self.assertEqual(response.status_code, 500)
+
+    # ---- business logic: file content (dispatched for any path with a dot in its last segment) ----
+
+    def test_project_member_can_fetch_file_content(self):
+        with patch('projects.views.requests.get') as mock_get:
+            mock_get.return_value = Mock(status_code=200, json=lambda: {'name': 'README.md', 'content': 'aGVsbG8=', 'encoding': 'base64'})
+            self.client.force_login(self.owner)
+            response = self.client.get(self._file_url('README.md'), {'branch': 'main'})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['name'], 'README.md')
+
+    def test_file_content_is_cached_after_the_first_fetch(self):
+        with patch('projects.views.requests.get') as mock_get:
+            mock_get.return_value = Mock(status_code=200, json=lambda: {'name': 'README.md', 'content': 'aGVsbG8='})
+            self.client.force_login(self.owner)
+            self.client.get(self._file_url('README.md'), {'branch': 'main'})
+            self.client.get(self._file_url('README.md'), {'branch': 'main'})
+            self.assertEqual(mock_get.call_count, 1)
+
+
+class PushFilesTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.owner = make_user('projowner')
+        self.member = make_user('projmember')
+        self.outsider = make_user('projvisitor')
+        self.project = Project.objects.create_project(self.owner.id, f'pushfilesproj_{secrets.token_hex(4)}', 'd')
+        developer_role = ProjectRole.objects.get(name='developer')
+        UserProjectRole.objects.give_role_to_user(self.project.id, self.member.id, developer_role)
+        self.repo_stat = ProjectRepoStats.objects.create(
+            github_repo_name='widgets', github_repo_link='https://github.com/acme/widgets', github_token='ghp_token'
+        )
+        self.project.repo_stats.add(self.repo_stat)
+
+    @staticmethod
+    def _url():
+        return reverse('projects:push-code')
+
+    def _post(self, payload):
+        return self.client.post(self._url(), data=json.dumps(payload), content_type='application/json')
+
+    def _payload(self, **overrides):
+        payload = {
+            'files': {'README.md': 'new content'},
+            'project': self.project.id,
+            'repo': 'widgets',
+            'owner': 'acme',
+            'branch': 'main',
+            'message': 'update readme',
+        }
+        payload.update(overrides)
+        return payload
+
+    def _give_member_task_access_to_readme(self):
+        task = ProjectTask.objects.add_task_to_project(self.project, 'Task', 'desc', '2025-01-01', '2025-02-01')
+        TaskResourceAccess.objects.add_resources_to_task(task, ['README.md'])
+        ProjectTaskParticipation.objects.add_task_participations(task, [self.member])
+
+    # ---- business logic ----
+
+    def test_owner_can_push_a_new_file(self):
+        with patch('projects.views.requests.get') as mock_get, \
+             patch('projects.views.requests.put') as mock_put:
+            mock_get.return_value = Mock(status_code=404)  # file doesn't exist yet - no sha to carry
+            mock_put.return_value = Mock(status_code=201)
+
+            self.client.force_login(self.owner)
+            response = self._post(self._payload())
+            self.assertEqual(response.status_code, 200)
+            mock_put.assert_called_once()
+            self.assertNotIn('sha', mock_put.call_args.kwargs['json'])
+            self.assertTrue(AuditLogAction.objects.filter(project=self.project, user=self.owner, action_type='push').exists())
+
+    def test_owner_can_update_an_existing_file(self):
+        with patch('projects.views.requests.get') as mock_get, \
+             patch('projects.views.requests.put') as mock_put:
+            mock_get.return_value = Mock(status_code=200, json=lambda: {'sha': 'existing-sha'})
+            mock_put.return_value = Mock(status_code=200)
+
+            self.client.force_login(self.owner)
+            response = self._post(self._payload())
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(mock_put.call_args.kwargs['json']['sha'], 'existing-sha')
+
+    def test_commit_message_carries_the_hmac_trailer_the_webhook_later_checks_for(self):
+        with patch('projects.views.requests.get') as mock_get, \
+             patch('projects.views.requests.put') as mock_put:
+            mock_get.return_value = Mock(status_code=404)
+            mock_put.return_value = Mock(status_code=201)
+
+            self.client.force_login(self.owner)
+            self._post(self._payload())
+
+            commit_message = mock_put.call_args.kwargs['json']['message']
+            self.assertIn('X-GitSync-Sig:', commit_message)
+
+    def test_non_owner_without_task_access_is_rejected(self):
+        with patch('projects.views.requests.put') as mock_put:
+            self.client.force_login(self.member)
+            response = self._post(self._payload())
+            self.assertEqual(response.status_code, 401)
+            mock_put.assert_not_called()
+
+    def test_non_owner_with_task_access_and_a_message_can_push(self):
+        self._give_member_task_access_to_readme()
+        with patch('projects.views.requests.get') as mock_get, \
+             patch('projects.views.requests.put') as mock_put:
+            mock_get.return_value = Mock(status_code=404)
+            mock_put.return_value = Mock(status_code=201)
+
+            self.client.force_login(self.member)
+            response = self._post(self._payload())
+            self.assertEqual(response.status_code, 200)
+
+    def test_non_owner_missing_commit_message_is_rejected(self):
+        self._give_member_task_access_to_readme()
+        with patch('projects.views.requests.put') as mock_put:
+            self.client.force_login(self.member)
+            response = self._post(self._payload(message=''))
+            self.assertEqual(response.status_code, 400)
+            mock_put.assert_not_called()
+
+    def test_file_locked_by_another_user_is_rejected(self):
+        self._give_member_task_access_to_readme()
+        ResourceAccess.objects.lock_file('README.md', self.project, self.owner)
+
+        with patch('projects.views.requests.put') as mock_put:
+            self.client.force_login(self.member)
+            response = self._post(self._payload())
+            self.assertEqual(response.status_code, 423)
+            mock_put.assert_not_called()
+
+    # ---- security ----
+
+    def test_requires_authentication(self):
+        response = self._post(self._payload())
+        self.assertEqual(response.status_code, 302)
+
+    # ---- rate limiting ----
+
+    def test_rate_limit_blocks_after_20_requests_per_user(self):
+        """push_files rate-limits POST by 'user' at 20/m."""
+        with patch('projects.views.requests.get') as mock_get, \
+             patch('projects.views.requests.put') as mock_put:
+            mock_get.return_value = Mock(status_code=404)
+            mock_put.return_value = Mock(status_code=201)
+
+            self.client.force_login(self.owner)
+            for attempt in range(20):
+                response = self._post(self._payload(files={f'file{attempt}.md': 'x'}))
+                self.assertEqual(response.status_code, 200, f"attempt {attempt + 1} should succeed, got {response.status_code}")
+            blocked = self._post(self._payload(files={'blocked.md': 'x'}))
+            self.assertEqual(blocked.status_code, 403, "21st POST within a minute should be rate-limited (user, 20/m)")

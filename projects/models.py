@@ -232,36 +232,6 @@ class ProjectTask(models.Model):
         ]
 
 
-class UserRoleValidator():
-    def is_operation_permitted(self, project, role_assignator, user, new_role):
-        """
-
-        :param role_assignator:
-        :param user:
-        :param new_role:
-        :return:
-        """
-        _project = Project.objects.get(id=project)
-        if _project is None:
-            raise ValueError("Project not found")
-        _role_assigner = User.objects.get(id=role_assignator)
-        if user is None:
-            raise ValueError("Role assignator not found")
-        _user = User.objects.get(id=user)
-        if _user is None:
-            raise ValueError("User not found")
-        if _project.owner_id == role_assignator:
-            return True
-        #is_assigner = UserRoleManager.is_user_in_project(_project,_role_assigner)
-        #is_user = UserRoleManager.is_user_in_project(_project, _user)
-        #if not is_assigner:
-        #    raise ValueError("Assigner not found")
-        #if not is_user:
-        #    raise ValueError("User not found")
-        #permission checking TODO
-        return True
-
-
 class ProjectRoleManager(models.Manager):
     def create_default_project_roles(self, project):
         try:
@@ -301,6 +271,7 @@ class ProjectRole(models.Model):
     can_kick_others = models.BooleanField(default=False)
     can_change_roles = models.BooleanField(default=False)
     can_create_branches = models.BooleanField(default=False)
+    can_modify_branches = models.BooleanField(default=False)
     can_merge_branches = models.BooleanField(default=False)
     can_delete_branches = models.BooleanField(default=False)
     can_add_tasks = models.BooleanField(default=False)
@@ -360,7 +331,7 @@ class UserProjectRoleManager(models.Manager):
     def get_role_permissions(self, role_name, project):
         permission_keys = [
             'can_accept_invites', 'can_invite_others', 'can_kick_others',
-            'can_change_roles', 'can_create_branches', 'can_merge_branches',
+            'can_change_roles', 'can_create_branches', 'can_modify_branches', 'can_merge_branches',
             'can_delete_branches', 'can_add_tasks',
             'can_delete_tasks', 'can_modify_tasks', 'can_modify_files',
             'can_execute_code', 'can_share_file_access', 'can_change_project_settings'

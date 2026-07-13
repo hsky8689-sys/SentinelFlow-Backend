@@ -21,7 +21,8 @@ from projects.github_utils import get_project_owner_repo_from_link, get_project_
     get_repo_token, fetch_github_tree_with_sizes, get_project_tree_paths, invalidate_repo_cache, get_default_branch, \
     get_all_github_repo_branches, add_new_branch_to_repo, modify_branch_from_repo, delete_branch_from_repo, \
     verify_github_signature, commit_was_pushed_from_app, _add_project_repository, _delete_project_repository, \
-    _get_project_push_policy, _set_project_push_policy, _clear_flagged_external_push, get_project_repo_summaries
+    _get_project_push_policy, _set_project_push_policy, _clear_flagged_external_push, get_project_repo_summaries, \
+    user_has_access_to_github_repo
 from projects.project_helpers import get_user_file_permissions, _get_project_domains, _add_project_domains, \
     _delete_project_domains, _get_project_requirements, _add_project_requirements, _remove_project_requirements, \
     _remove_project_sections, _add_project_sections, _get_project_tasks, _add_project_task, _remove_project_tasks, \
@@ -235,6 +236,8 @@ def handle_file_content(request,owner, repo, path, branch='main'):
     return JsonResponse(r.json(), status=r.status_code, safe=False)
 @login_required
 def github_proxy_view(request, owner, repo, path=""):
+    if not user_has_access_to_github_repo(request.user, owner, repo):
+        return JsonResponse({'status': 'error', 'message': 'You do not have access to this repository'}, status=403)
     #invalidate_repo_cache(repo,owner)
     branch = request.GET.get('branch') or get_default_branch(owner, repo) or "main"
     if path != "" and '.' in path.split('/')[-1]:
@@ -296,7 +299,6 @@ def proxy_run_code(request):
             return JsonResponse({'error':'Visitor cannot execute code in this project'},status=403)
         if not UserProjectRole.objects.get_role_permissions(role, project)['can_execute_code']:
             return JsonResponse({'error':'You do not have the permission to execute code in this project'},status=403)
-
         if not source_code:
             return JsonResponse({'error':'Code fragment is empty'},status=400)
         url = settings.RAPIDAPI_URL
@@ -1307,14 +1309,15 @@ def webhook_github(request,id):
         if repo_full_name not in tracked_full_names:
             return JsonResponse({'status': 'bad request', 'message': 'given repository is not associated with the project'}, status=400)
 
-        repo_stat = ProjectRepoStats.objects.filter(github_repo_link__icontains=repo_full_name).first()
-        if repo_stat is None:
-            return JsonResponse({'status': 'bad request', 'message': 'repo not tracked'}, status=404)
-
-        project = repo_stat.projects.first()
-        if project is None:
-            return JsonResponse({'status': 'bad request', 'message': 'repo not linked to any project'}, status=404)
-
+        # `project` (looked up from the URL's id) already tracks
+        # repo_full_name at this point - previously this re-looked-up
+        # repo_stat with a GLOBAL, unscoped query and reassigned `project`
+        # to repo_stat.projects.first(). Since ProjectRepoStats can be
+        # shared by several projects (Project.repo_stats is M2M), that
+        # silently swapped in whichever project got linked to the shared
+        # repo first, ignoring the URL's id for the signature check and the
+        # flagging that follows - a legitimate webhook for project B could
+        # get checked against project A's signing key instead.
         if not verify_github_signature(request.body, signature_header, project.app_signing_key):
             return JsonResponse({'status': 'unauthorized', 'message': 'invalid signature'}, status=403)
 
