@@ -166,13 +166,35 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
+    'corsheaders'
 ]
+CORS_ALLOW_CREDENTIALS = True
+# Permite trimiterea cookie-ului pe porturi diferite în development
+CSRF_COOKIE_SAMESITE = 'Lax'
+SESSION_COOKIE_SAMESITE = 'Lax'
 
+# NU le pune pe True în local (pe http://), altfel browserul le va bloca!
+# Doar când treci pe HTTPS (producție) le pui pe True.
+CSRF_COOKIE_SECURE = False
+SESSION_COOKIE_SECURE = False
+
+# Permite Javascript-ului (Axios) să citească cookie-ul de CSRF ca să îl poată pune în header
+CSRF_COOKIE_HTTPONLY = False  # <--- ASTA E SUPER IMPORTANTĂ! Dacă e True, Axios nu poate citi cookie-ul!
+CORS_ALLOWED_ORIGINS =[
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+]
+#all requests coming directly from client react processes are not csrf
+CSRF_TRUSTED_ORIGINS = [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+]
 DEBUG_TOOLBAR_PANELS = [
     'debug_toolbar.panels.cache.CachePanel',
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'debug_toolbar.middleware.DebugToolbarMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',

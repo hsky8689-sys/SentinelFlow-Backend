@@ -4,7 +4,8 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_protect
+from django.middleware.csrf import get_token
+from django.views.decorators.csrf import csrf_protect, csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_http_methods, require_GET, require_POST
 from django_ratelimit.decorators import ratelimit
 
@@ -151,8 +152,11 @@ def login_page(request):
     if request.method == "POST":
         if request.user.is_authenticated:
             return JsonResponse({'status':'bad request','message':'You are already logged in'},status=400)
-        username = request.POST['username']
-        password = request.POST['password']
+        data = json.loads(request.body)
+        username = data.get('username')
+        password = data.get('password')
+        if not username or not password:
+                return JsonResponse({'status': 'bad request', 'message': 'Missing credentials'}, status=400)
         user = authenticate(request,username=username,password=password)
         if user:
             login(request, user)
@@ -361,3 +365,11 @@ def connections_page(request):
         return JsonResponse({'status': 'success', 'user_id': request.user.id, 'requests': serialized_requests})
     except Exception:
         return JsonResponse({'status': 'success', 'user_id': request.user.id, 'requests': []})
+@ensure_csrf_cookie
+#@ratelimit(key='ip',rate='30/m',block=True)
+def provide_csrf_token(request):
+    token = get_token(request)
+    return JsonResponse({'status':'success',
+                                         'message':'Succesfully provided csrf token',
+                                         'csrftoken':token
+                                         },status=200)

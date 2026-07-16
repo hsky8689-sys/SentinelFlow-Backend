@@ -3,7 +3,7 @@ from django.urls import path
 from projects.views import api_request_file_access
 from users.views import signup_page, acces_profile, api_add_skill, api_delete_skill, search_page, \
     search_api, create_project, api_friend_requests, connections_page, api_friend_request_detail, \
-    api_remove_friend, logout_page
+    api_remove_friend, logout_page, provide_csrf_token
 
 app_name = 'users'
 
@@ -23,4 +23,5 @@ urlpatterns = [
     # must stay last: a bare <slug:username>/ would otherwise swallow every literal
     # single-segment path above it (skills/, search/, friend-requests/, etc.)
     path('<slug:username>',acces_profile,name="profile-path"),
+    path('api/csrf-token',provide_csrf_token)
 ]
