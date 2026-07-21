@@ -1,19 +1,23 @@
+import io
 import json
 
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
+from django.core.files.base import ContentFile
 from django.db import transaction
+from devnetwork.caching import cache_manager, UserCacheKey
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import csrf_protect, csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_http_methods, require_GET, require_POST
 from django_ratelimit.decorators import ratelimit
-
+from PIL import Image
+import secrets
+from decouple import config
 from projects.models import Project, ProjectSkillRequirement
 from .models import User, UserProfileSection, UserTechnicalSkillSection, UserTechnicalSkill, UserRequest, Friendship, \
     UserProfileData
 from .search import SearchManager, SearchFilterData
-
 
 @login_required
 @csrf_protect
@@ -272,26 +276,85 @@ def api_add_techstack_section(request):
             return JsonResponse({'status':'bad request','message':'section name is mandatory'},status=400)
         if (skills_names is not None) and (not isinstance(skills_names,list)):
             return JsonResponse({'status':'bad request','message':'you can either provide a LIST of skill names or no skill names at all'},status=400)
-        new_section = UserTechnicalSkillSection.objects.create(name=section_name,
-                                                               user=request.user)
-        if new_section is None:
-            return JsonResponse({'status': 'error', 'message': 'Could not create techstack section'}, status=500)
-        skills_length = len(skills_names) if skills_names is not None else 0
-        if skills_length>0:
-            created = UserTechnicalSkill.objects.bulk_create([UserTechnicalSkill(name=name,section=new_section)
-                                                for name in skills_names])
-            skills_saved = len(created) == skills_length
-            if not skills_saved:new_section.delete()
-            return JsonResponse({'status':'success' if skills_saved else 'error',
-                                      'message':'both new section and set of skills were saved' if skills_saved
-                                       else 'could not save new section and skills',
-                                      'skills_data':[{"id":s.id,"name":s.name} for s in created]
-                                                      if skills_saved else [],
-                                      'section_id':new_section.id},
-                                status=200 if skills_saved else 500)
-        return JsonResponse({'status':'success','message':'section succesfully created','section_id':new_section.id},status=200)
+        result = UserTechnicalSkillSection.objects.add_user_techstack(name=section_name,
+                                                                       user=request.user,
+                                                                       skills_names=skills_names)
+        if result == 'duplicate':
+            return JsonResponse({'status':'error','message':'You already have a techstack section with this name'},status=409)
+        if result == 'error':
+            return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
+        skills_data = [{"id":s.id,"name":s.name} for s in UserTechnicalSkill.objects.get_skills_from_section(result.id)]
+        return JsonResponse({'status':'success','message':'section succesfully created',
+                             'section_id':result.id,'skills_data':skills_data},status=200)
     except Exception as e:
         return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
+@login_required
+@csrf_protect
+@require_http_methods(["DELETE"])
+@transaction.atomic
+@ratelimit(key='user',rate='30/m',block=True)
+def api_delete_techstack_section(request,section_id):
+    try:
+        section = UserTechnicalSkillSection.objects.get(id=section_id)
+        deleted = UserTechnicalSkillSection.objects.remove_user_techstack(section, request.user)
+        if not deleted:
+            return JsonResponse({'status':'error','message':'You do not own this techstack section'},status=403)
+        return JsonResponse({'status': 'success'})
+    except UserTechnicalSkillSection.DoesNotExist:
+        return JsonResponse({'status':'error','message':'Section not found'},status=404)
+@login_required
+@csrf_protect
+@require_POST
+@ratelimit(key='user',rate='30/m',block=True)
+def api_add_profile_section(request):
+    try:
+        body = json.loads(request.body)
+        name = body.get('name')
+        content = body.get('content')
+        hidden = body.get('hidden', False)
+        if not name or not content:
+            return JsonResponse({'status':'bad request','message':'name and content are mandatory'},status=400)
+        if not isinstance(hidden,bool):
+            return JsonResponse({'status':'bad request','message':'hidden must be a boolean'},status=400)
+        new_section_id = UserProfileSection.objects.create_user_profile_section(user=request.user,name=name,content=content,hidden=hidden)
+        if new_section_id is None:
+            return JsonResponse({'status': 'error', 'message': 'Could not add profile section'}, status=500)
+        return JsonResponse({'status':'success','message':'Profile section created','id':new_section_id},status=200)
+    except Exception as e:
+        return JsonResponse({'status':'error','message':'Internal server error'},status=500)
+@login_required
+@csrf_protect
+@require_http_methods(["PUT","DELETE"])
+@ratelimit(key='user',rate='30/m',block=True)
+def api_handle_profile_section(request,section_id):
+    match request.method:
+        case "PUT":
+            try:
+                body = json.loads(request.body)
+                name = body.get('name')
+                content = body.get('content')
+                hidden = body.get('hidden', False)
+                if not name or not content:
+                    return JsonResponse({'status':'bad request','message':'name and content are mandatory'},status=400)
+                if not isinstance(hidden,bool):
+                    return JsonResponse({'status':'bad request','message':'hidden must be a boolean'},status=400)
+                new_section = UserProfileSection(id=section_id,name=name,content=content,hidden=hidden)
+                updated = UserProfileSection.objects.update_user_profile_section(new_section,request.user)
+                if updated is None:
+                    return JsonResponse({'status':'error','message':'Internal server error'},status=500)
+                if not updated:
+                    return JsonResponse({'status':'error','message':'You do not own this profile section'},status=403)
+                return JsonResponse({'status':'success'},status=200)
+            except Exception as e:
+                return JsonResponse({'status':'error','message':'Internal server error'},status=500)
+        case "DELETE":
+            try:
+                deleted = UserProfileSection.objects.delete_user_profile_section(request.user,section_id)
+                if not deleted:
+                    return JsonResponse({'status':'error','message':'You do not own this profile section'},status=403)
+                return JsonResponse({'status':'success'},status=200)
+            except Exception as e:
+                return JsonResponse({'status':'error','message':'Internal server error'},status=500)
 @login_required
 @csrf_protect
 @require_http_methods(["DELETE"])
@@ -401,8 +464,141 @@ def connections_page(request):
         return JsonResponse({'status': 'success', 'user_id': request.user.id, 'requests': serialized_requests})
     except Exception:
         return JsonResponse({'status': 'success', 'user_id': request.user.id, 'requests': []})
+@login_required
+@csrf_protect
+@require_POST
+@ratelimit(key='user',rate='20/m',block=True)
+def api_handle_profile_picture_upload(request):
+    picture = request.FILES['picture']
+    img_data = Image.open(picture)
+    if picture.size > config('MAX_PICTURE_SIZE',cast=int):
+        return JsonResponse({'status': 'error',
+                                  'message':
+                                  'Image too large'}, status=400)
+    try:
+        user = request.user
+        img_data.verify()
+        if img_data.format not in (["PNG","JPEG"]):
+            return JsonResponse({'status':'bad request',
+                                 'message':'Unsupported image format'},
+                                 status=401)
+        profile_data = UserProfileData.objects.get_profile_data(user)
+        if profile_data is None:
+            return JsonResponse({'status':'error',
+                                 'message':'could not get user profile data'},
+                                status=500)
+        picture.seek(0)
+        reencoded_picture = Image.open(picture)
+        width, height = reencoded_picture.size
+
+        if width > config('MAX_PROFILE_PIC_W',cast=int):
+            return JsonResponse({'status':'bad request',
+                                      'message':'Maximum width for profile picture exceeded'},
+                                      status=400)
+        if width < config('MIN_PROFILE_PIC_W',cast=int):
+            return JsonResponse({'status':'bad request',
+                                      'message':'Minimum width for profile not respected'},
+                                      status=400)
+        if height > config('MAX_PROFILE_PIC_H',cast=int):
+            return JsonResponse({'status':'bad request',
+                                      'message':'Maximum height for profile picture exceeded'},
+                                      status=400)
+        if height < config('MIN_PROFILE_PIC_H',cast=int):
+            return JsonResponse({'status':'bad request',
+                                      'message':'Minimum height for profile not respected'},
+                                      status=400)
+
+        old_picture_name = profile_data.profile_picture.name
+        old_picture_storage = profile_data.profile_picture.storage
+        buffer = io.BytesIO()
+        reencoded_picture.save(buffer,format=img_data.format)
+        buffer.seek(0)
+        filename = f'user_{user.id}_{secrets.token_hex(4)}.{img_data.format.lower()}'
+        django_file = ContentFile(buffer.read(),name=filename)
+        profile_data.profile_picture.save(filename,django_file,save=True)
+        cache_manager.delete(UserCacheKey.PROFILE_DATA.format(user_id=user.id))
+
+        if old_picture_name and old_picture_name != 'static/profile_pictures/sbcf-default-avatar.png':
+            old_picture_storage.delete(old_picture_name)
+
+        return JsonResponse({'status':'success',
+                                  'message':'profile picture successfully uploaded',
+                                  'photo_url':profile_data.profile_picture.url},
+                                  status=200)
+    except Exception as e:
+        print(str(e))
+        return JsonResponse({'status':'error',
+                                  'message':'corrupted file sent'},
+                                  status=400)
+@login_required
+@csrf_protect
+@require_POST
+@ratelimit(key='user',rate='20/m',block=True)
+def api_add_background_picture(request):
+    picture = request.FILES['picture']
+    img_data = Image.open(picture)
+    if picture.size > config('MAX_PICTURE_SIZE',cast=int):
+        return JsonResponse({'status': 'error',
+                                  'message':
+                                  'Image too large'}, status=400)
+    try:
+        user = request.user
+        img_data.verify()
+        if img_data.format not in (["PNG","JPEG"]):
+            return JsonResponse({'status':'bad request',
+                                 'message':'Unsupported image format'},
+                                 status=401)
+        profile_data = UserProfileData.objects.get_profile_data(user)
+        if profile_data is None:
+            return JsonResponse({'status':'error',
+                                 'message':'could not get user profile data'},
+                                status=500)
+        picture.seek(0)
+        reencoded_picture = Image.open(picture)
+        width, height = reencoded_picture.size
+
+        if width > config('MAX_BACKGROUND_PIC_W',cast=int):
+            return JsonResponse({'status':'bad request',
+                                      'message':'Maximum width for background picture exceeded'},
+                                      status=400)
+        if width < config('MIN_BACKGROUND_PIC_W',cast=int):
+            return JsonResponse({'status':'bad request',
+                                      'message':'Minimum width for background not respected'},
+                                      status=400)
+        if height > config('MAX_BACKGROUND_PIC_H',cast=int):
+            return JsonResponse({'status':'bad request',
+                                      'message':'Maximum height for background picture exceeded'},
+                                      status=400)
+        if height < config('MIN_BACKGROUND_PIC_H',cast=int):
+            return JsonResponse({'status':'bad request',
+                                      'message':'Minimum height for background not respected'},
+                                      status=400)
+
+        old_picture_name = profile_data.background_picture.name
+        old_picture_storage = profile_data.background_picture.storage
+        buffer = io.BytesIO()
+        reencoded_picture.save(buffer,format=img_data.format)
+        buffer.seek(0)
+        filename = f'user_{user.id}_{secrets.token_hex(4)}.{img_data.format.lower()}'
+        django_file = ContentFile(buffer.read(),name=filename)
+        profile_data.background_picture.save(filename,django_file,save=True)
+        cache_manager.delete(UserCacheKey.PROFILE_DATA.format(user_id=user.id))
+
+        if old_picture_name and old_picture_name != 'static/background_pictures/sbcf-default-backgrounds.png':
+            old_picture_storage.delete(old_picture_name)
+
+        return JsonResponse({'status':'success',
+                                  'message':'background picture successfully uploaded',
+                                  'photo_url':profile_data.background_picture.url},
+                                  status=200)
+    except Exception as e:
+        print(str(e))
+        return JsonResponse({'status':'error',
+                                  'message':'corrupted file sent'},
+                                  status=400)
+
 @ensure_csrf_cookie
-#@ratelimit(key='ip',rate='30/m',block=True)
+#@ratelimit(key='ip',rate='20/m',block=True)
 def provide_csrf_token(request):
     token = get_token(request)
     return JsonResponse({'status':'success',

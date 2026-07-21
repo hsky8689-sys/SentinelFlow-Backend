@@ -88,7 +88,7 @@ class CustomUserProfileSectionManager(models.Manager):
         :param name: The new section's name (Non-empty at least 100 characters)
         :param content: The new section's content (Non-empty at least 100 characters)
         :param hidden: States if the section will be or not hidden to foreign profile visitors
-        :return: None
+        :return: the id of the newly created section
         """
         new_section = (self.create(user=user,
                                name=name,
@@ -97,6 +97,7 @@ class CustomUserProfileSectionManager(models.Manager):
                                ))
         new_section.save()
         cache_manager.delete(UserCacheKey.PROFILE_SECTIONS.format(user_id=user.id))
+        return new_section.id
     def delete_user_profile_section(self,user:User,section_id):
         """
         Deletes a former profile section from an user's personal page
@@ -107,21 +108,22 @@ class CustomUserProfileSectionManager(models.Manager):
         cache_manager.delete(UserCacheKey.PROFILE_SECTIONS.format(user_id=user.id))
         return self.filter(id=section_id).count() == 0
 
-    def update_user_profile_section(self,new_section)-> bool | None:
+    def update_user_profile_section(self,new_section,user)-> bool | None:
         """
-        Updates a user's profile section
-        :param user:
+        Updates a user's profile section, but only if it belongs to `user` -
+        otherwise anyone could edit another user's profile section just by
+        knowing its id.
+        :param new_section: object carrying id/name/content/hidden to write
+        :param user: the requesting user; only their own section may be updated
         :return: true or false if the section was updated accordingly
         """
         try:
             with transaction.atomic():
-                former_section = UserProfileSection.objects.select_for_update().filter(id=new_section.id)
-                if former_section is None:
+                former_section = UserProfileSection.objects.select_for_update().filter(id=new_section.id,user_id=user.id)
+                if not former_section.exists():
                     return False
-                owner_user_id = former_section.values_list('user_id', flat=True).first()
                 former_section.update(name=new_section.name,content=new_section.content,hidden=new_section.hidden)
-                if owner_user_id is not None:
-                    cache_manager.delete(UserCacheKey.PROFILE_SECTIONS.format(user_id=owner_user_id))
+                cache_manager.delete(UserCacheKey.PROFILE_SECTIONS.format(user_id=user.id))
                 return True
         except (django.db.DatabaseError,ValueError) as err:
             print(f"Error handling request: {str(err)}")
@@ -240,6 +242,53 @@ class UserTechnicalSkillSectionManager(models.Manager):
                 user=user,
                 name=name
             )
+
+    def add_user_techstack(self,name,user,skills_names=None):
+        """
+        Creates a new tech-stack section named `name` for `user`, optionally
+        seeded with `skills_names`. Rejects a name the user already has a
+        section for, instead of silently creating a second section with the
+        same name and splitting their skills across both.
+        :param name: the section name
+        :param user: the requesting user; the section is scoped to them
+        :param skills_names: optional list of skill names to create under the new section
+        :return: the created UserTechnicalSkillSection on success, or the
+                 string sentinel 'duplicate' if `user` already has a section
+                 named `name`, or 'error' on a database failure
+        """
+        try:
+            with transaction.atomic():
+                if self.filter(user=user,name=name).exists():
+                    return 'duplicate'
+                new_section = self.create(name=name,user=user)
+                if skills_names:
+                    UserTechnicalSkill.objects.bulk_create(
+                        [UserTechnicalSkill(name=skill_name,section=new_section) for skill_name in skills_names]
+                    )
+            cache_manager.delete(UserCacheKey.TECHSTACK.format(user_id=user.id))
+            return new_section
+        except django.db.DatabaseError as e:
+            print(str(e))
+            return 'error'
+
+    def remove_user_techstack(self,section,user):
+        """
+        Deletes `section` only if it belongs to `user` - same ownership-scoped
+        delete pattern as UserTechnicalSkillsManager.remove_user_skill, so one
+        user can't delete another user's section just by knowing its id. Every
+        UserTechnicalSkill under the section cascades away with it via the
+        section FK's on_delete=CASCADE.
+        :param section:
+        :param user: the requesting user; only their own sections may be deleted
+        :return: True if a row was actually deleted, False if the section
+                 doesn't exist or isn't owned by `user`
+        """
+        if not section:
+            raise django.db.DatabaseError("Section cannot be None")
+        deleted_count, _ = self.filter(id=section.id,user=user).delete()
+        if deleted_count:
+            cache_manager.delete(UserCacheKey.TECHSTACK.format(user_id=user.id))
+        return deleted_count > 0
 
     def get_user_techstack(self,user):
         """

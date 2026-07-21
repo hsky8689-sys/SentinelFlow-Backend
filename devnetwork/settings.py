@@ -236,6 +236,21 @@ DATABASES = {
 
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+# django.contrib.staticfiles intercepts every /static/... request itself (via
+# its runserver override) before any custom urls.py pattern for that same
+# prefix is ever reached, using the finders below rather than normal URL
+# resolution - so uploaded pictures under BASE_DIR/static/ only become
+# servable in dev by registering that folder here, not by adding a urls.py route.
+STATICFILES_DIRS = [BASE_DIR / 'static']
+
+# User-uploaded files (profile/background pictures). MEDIA_URL is left empty
+# and MEDIA_ROOT is the project root - not BASE_DIR/'static' - because the
+# ImageField upload_to paths already start with 'static/profile_pictures/...',
+# so FieldFile.url already resolves to '/static/profile_pictures/...' and the
+# storage backend already resolves to BASE_DIR/static/profile_pictures/... .
+# Changing either would break every already-stored file path.
+MEDIA_URL = ''
+MEDIA_ROOT = BASE_DIR
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
